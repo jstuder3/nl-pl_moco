@@ -1,4 +1,4 @@
-#this code will later be adapted for PyTorchLightning. for simplicity, it will be based on just PyTsorch for now
+#this code will later be adapted for PyTorchLightning. for simplicity, it will be based on just PyTorch for now
 
 import torch
 #import transformers
@@ -8,7 +8,7 @@ from datasets import load_dataset
 
 num_epochs = 1
 learning_rate = 5e-4 #see CodeBERT paper
-batch_size=2048 #see CodeBERT paper
+batch_size=1 #see CodeBERT paper
 model_name = "microsoft/codebert-base"
 
 device="cuda" if torch.cuda.is_available() else "cpu"
@@ -32,26 +32,32 @@ class MoCoModel(nn.Module):
                                          nn.Linear(2048, 128))
 
     def forward(self, encoder_input, momentum_encoder_input):
-        encoder_output = self.encoder(encoder_input)
-        momentum_encoder_output = self.momentum_encoder(momentum_encoder_input)
+        encoder_output = self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])["pooler_output"] #note entirely sure but I think I may only need the "pooler_output" [bs, 768] and not the "last_hidden_state" [bs, 512, 768]
+        momentum_encoder_output = self.momentum_encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"]
 
         #if the queue is full, replace the oldest entry
         if (len(self.queue)>=self.max_queue_size):
-            self.queue[self.current_index]=momentum_encoder_output
+            self.queue[self.current_index]=momentum_encoder_output.detach() #it's important to detach so we don't backprop through the momentum encoder
             self.current_index=(self.current_index+1)%self.max_queue_size #I smell an off-by-one error
         else: #queue is not yet full
-            self.queue.append(momentum_encoder_output)
+            self.queue.append(momentum_encoder_output.detach()) #it's important to detach so we don't backprop through the momentum encoder
 
         return encoder_output #we will manually access the queue later, so we only need to return this for now
 
-    def mlp_forward(self, encoder_mlp_input, momentum_encoder_mlp_input):
+    def mlp_forward(self, encoder_mlp_input):
         encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
-        momentum_encoder_mlp_output = self.momentum_encoder_mlp(momentum_encoder_mlp_input)  # if feeding self.queue even works directly; note: we will need to update the right side up to the MLP since the two MLPs don't share weights
+        momentum_encoder_mlp_output = torch.tensor([]).to(device)
+        for queue_entry in self.queue:
+            momentum_encoder_mlp_output = torch.hstack((momentum_encoder_mlp_output, self.momentum_encoder_mlp(queue_entry)))  #maybe hstack?
         return encoder_mlp_output, momentum_encoder_mlp_output
 
     def update_momentum_encoder(self):
         #update momentum_encoder weights by taking the weighted average of the current weights and the new encoder weights
-        self.momentum_encoder.copy(self.update_weight*self.momentum_encoder.parameters() + (1-self.update_weight)*self.encoder.parameters())
+        #note:need to make sure that this actually works
+        encoder_params = self.encoder.state_dict()
+        for name, param in self.momentum_encoder.named_parameters():
+            param=self.update_weight * param + (1-self.update_weight)*encoder_params[name]
+
         #need to verify that this does the intended thing
 
 #[LOAD DATA]
@@ -81,8 +87,6 @@ def joinCodeTokens(dict):
 #dataset=dataset.add_column("func_documentation_string_shortened", ["" for i in range(len(list(dataset)))]) #apparently not necessary
 dataset=dataset.map(shorten_data)
 dataset=dataset.map(joinCodeTokens)
-
-
 
 #[TOKENIZE DATA]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -123,13 +127,27 @@ criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was pretrained using Adam
 
 #[TRAINING LOOP]
-for epoch in range(num_epochs):
+    for epoch in range(num_epochs):
     for i, batch in enumerate(train_loader):
-        doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
-        code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
-        x=1
+        doc_samples = {"input_ids": torch.tensor(batch["doc_input_ids"]).to(device), "attention_mask": torch.tensor(batch["doc_attention_mask"]).to(device)}
+        code_samples = {"input_ids": torch.tensor(batch["code_input_ids"].to(device)), "attention_mask": torch.tensor(batch["code_attention_mask"]).to(device)}
+
+        encoder_embeddings = model(doc_samples, code_samples)
+
+        encoder_mlp, momentum_encoder_mlp = model.mlp_forward(encoder_embeddings)
 
         optimizer.zero_grad()
+
+        #define loss
+
+        
+
+        optimizer.step()
+        model.update_momentum_encoder()
+
+
+
+
 
 
 #[TRAINING LOOP]
