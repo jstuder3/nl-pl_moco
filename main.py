@@ -127,7 +127,7 @@ criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was pretrained using Adam
 
 #[TRAINING LOOP]
-    for epoch in range(num_epochs):
+for epoch in range(num_epochs):
     for i, batch in enumerate(train_loader):
         doc_samples = {"input_ids": torch.tensor(batch["doc_input_ids"]).to(device), "attention_mask": torch.tensor(batch["doc_attention_mask"]).to(device)}
         code_samples = {"input_ids": torch.tensor(batch["code_input_ids"].to(device)), "attention_mask": torch.tensor(batch["code_attention_mask"]).to(device)}
@@ -140,7 +140,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was
 
         #define loss
 
-        
+
 
         optimizer.step()
         model.update_momentum_encoder()
