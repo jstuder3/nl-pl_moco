@@ -1,12 +1,17 @@
 #this code will later be adapted for PyTorchLightning. for simplicity, it will be based on just PyTsorch for now
 
-#import torch
+import torch
 #import transformers
 from torch import nn
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AdamW
 from datasets import load_dataset
 
-model_name = "microsoft/CodeBERT"
+num_epochs = 1
+learning_rate = 5e-4 #see CodeBERT paper
+batch_size=2048 #see CodeBERT paper
+model_name = "microsoft/codebert-base"
+
+device="cuda" if torch.cuda.is_available() else "cpu"
 
 #[MODEL DEFINITION]
 class MoCoModel(nn.Module):
@@ -50,12 +55,82 @@ class MoCoModel(nn.Module):
         #need to verify that this does the intended thing
 
 #[LOAD DATA]
-dataset = load_dataset("code_serach_net", "python", split="train[:10%]") #change "python" to "all" or any of the other languages to get different subset
+dataset = load_dataset("code_search_net", "python", split="train[:5%]") #change "python" to "all" or any of the other languages to get different subset
 #this returns a dictionary (for split "train", "validation", "test" or all of them if none selected) with several keys, but we only really care about "func_code_tokens" and
 #"func_documentation_tokens", which both return a list of tokens (strings)
 
+#[FILTERING AND PREPROCESSING]
+
+#the dataset is already prefiltered. the only thing we need to do is to shorten documentations to the first paragraph.
+#NOTE: we can't just use the pre-tokenized column in the dataset because it does not contain empty spaces, thus potentially losing information
+
+#takes as input a dict that has a key "func_documentation_string", shortens that to the first paragraph and puts the result under the key "func_documentation_string_shortened"
+def shorten_data(dict):
+    shortened_doc = " ".join(dict["func_documentation_string"].partition("\n\n")[0].split()) #shortens to the first paragraph and removes all "\n" and multi-whitespaces from the remainders
+    dict["func_documentation_string_shortened"] = shortened_doc
+    return dict
+
+#takes as input a dict that has a key "func_code_tokens", concatenates all the tokens and puts them into the key "func_code_tokens_concatenated"
+#a bit simpler than filtering "func_code_string" but might cause issues later because the output really isn't "perfect"
+#in the sense that it contains many unnecessary whitespaces
+def joinCodeTokens(dict):
+    concatenated_tokens = " ".join(dict["func_code_tokens"])
+    dict["func_code_string_cleaned"]=concatenated_tokens
+    return dict
+
+#dataset=dataset.add_column("func_documentation_string_shortened", ["" for i in range(len(list(dataset)))]) #apparently not necessary
+dataset=dataset.map(shorten_data)
+dataset=dataset.map(joinCodeTokens)
+
+
+
 #[TOKENIZE DATA]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+train_docs_tokens = tokenizer(dataset["func_documentation_string_shortened"], truncation=True, padding=True)
+train_code_tokens = tokenizer(dataset["func_code_string_cleaned"], truncation=True, padding=True)
+
+#[CREATE TRAIN DATASET OBJECT]
+
+class CodeSearchNetDataset(torch.utils.data.Dataset):
+    def __init__(self, doc_tokens, code_tokens):
+        self.doc_tokens = doc_tokens
+        self.code_tokens = code_tokens
+
+    def __getitem__(self, index):
+        #item=[]
+        #item.append({key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()})
+        #item.append({key: torch.tensor(val[index]) for key, val in self.code_tokens.items()})
+        item = {"doc_"+key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()}
+        item = item | {"code_"+key: torch.tensor(val[index]) for key, val in self.code_tokens.items()} #requires python 3.9+
+        #item = {"input_ids": self.doc_tokens["input_ids"][index], "attention_mask": self.doc_tokens["attention_mask"][index], "label": self.code_tokens["input_ids"][index], "label_attention_mask": self.code_tokens["attention_mask"][index]}
+        return item
+
+    def __len__(self):
+        return len(self.doc_tokens["input_ids"])
+
+
+train_dataset = CodeSearchNetDataset(train_docs_tokens, train_code_tokens)
+
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+#this expects an entry in the dict that is called "label"
+
+#[GENERATE MODEL]
+model = MoCoModel(8, 0.999).to(device)
+
+#[GENERATE OPTIMIZATION STUFF]
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was pretrained using Adam
+
+#[TRAINING LOOP]
+for epoch in range(num_epochs):
+    for i, batch in enumerate(train_loader):
+        doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
+        code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
+        x=1
+
+        optimizer.zero_grad()
+
 
 #[TRAINING LOOP]
 
