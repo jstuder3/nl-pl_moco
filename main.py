@@ -8,7 +8,7 @@ from datasets import load_dataset
 
 num_epochs = 1
 learning_rate = 5e-4 #see CodeBERT paper
-batch_size=1 #see CodeBERT paper
+batch_size=2 #see CodeBERT paper
 temperature=0.07 #see MoCoV1
 model_name = "microsoft/codebert-base"
 
@@ -55,7 +55,7 @@ class MoCoModel(nn.Module):
             if index == self.getIndexOfNewestQueueEntry(): #if it's part of the positive samples (done for simpler access later)
                 positive_mlp_output = mlp_output
             else:
-                momentum_encoder_mlp_output = torch.hstack((momentum_encoder_mlp_output, mlp_output))  # maybe hstack?
+                momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)  # maybe hstack?
         #momentum_encoder_mlp_output = []
         #for queue_entry in self.queue:
         #    momentum_encoder_mlp_output.append(self.momentum_encoder_mlp(queue_entry))
@@ -147,8 +147,8 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was
 #[TRAINING LOOP]
 for epoch in range(num_epochs):
     for i, batch in enumerate(train_loader):
-        doc_samples = {"input_ids": torch.tensor(batch["doc_input_ids"]).to(device), "attention_mask": torch.tensor(batch["doc_attention_mask"]).to(device)}
-        code_samples = {"input_ids": torch.tensor(batch["code_input_ids"].to(device)), "attention_mask": torch.tensor(batch["code_attention_mask"]).to(device)}
+        doc_samples = {"input_ids": batch["doc_input_ids"].to(device), "attention_mask": batch["doc_attention_mask"].to(device)}
+        code_samples = {"input_ids": batch["code_input_ids"].to(device), "attention_mask": batch["code_attention_mask"].to(device)}
 
         current_batch_size = doc_samples["input_ids"].shape[0]
 
@@ -162,20 +162,24 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
 
         #define loss
-        if neg_mlp_emb.shape[0]!=0: #need at least one negative minibatch in the queue (so we don't backprop on the first iteration)
-            l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)), pos_mlp_emb.view((current_batch_size, 128, 1))) #not really sure what this outputs, but MoCoV1 does it like this
+        l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)), pos_mlp_emb.view((current_batch_size, 128, 1)))
 
-            l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), neg_mlp_emb.view((128, -1)))
+        logits = None
+        if neg_mlp_emb.shape[0] != 0:
+            l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), torch.transpose(neg_mlp_emb, 0, 1))
+            logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
+        else:
+            logits = l_pos.view((current_batch_size, 1))
 
-            logits = torch.cat((l_pos, l_neg), dim=1)
+        labels = torch.tensor([0 for h in range(current_batch_size)]).to(device) #ugly but does the job
+        #torch.zeros((current_batch_size, 1), dtype=torch.LongTensor).to(device) #this function has only very limited
+        # overloads, and just converting to torch.LongTensor won't work somehow...
+        loss = cross_entropy_loss(logits/temperature, labels)
+        print(loss.item())
+        loss.backward()
+        optimizer.step()
 
-            labels = torch.zeros(current_batch_size)
-            loss = cross_entropy_loss(logits/temperature, labels)
-
-            loss.backward()
-            optimizer.step()
-
-            model.update_momentum_encoder()
+        model.update_momentum_encoder()
 
 
 
