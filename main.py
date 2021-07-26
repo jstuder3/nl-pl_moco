@@ -9,6 +9,7 @@ from datasets import load_dataset
 num_epochs = 1
 learning_rate = 5e-4 #see CodeBERT paper
 batch_size=1 #see CodeBERT paper
+temperature=0.07 #see MoCoV1
 model_name = "microsoft/codebert-base"
 
 device="cuda" if torch.cuda.is_available() else "cpu"
@@ -41,15 +42,24 @@ class MoCoModel(nn.Module):
             self.current_index=(self.current_index+1)%self.max_queue_size #I smell an off-by-one error
         else: #queue is not yet full
             self.queue.append(momentum_encoder_output.detach()) #it's important to detach so we don't backprop through the momentum encoder
+            self.current_index=(self.current_index+1)%self.max_queue_size
 
         return encoder_output #we will manually access the queue later, so we only need to return this for now
 
     def mlp_forward(self, encoder_mlp_input):
         encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
+        positive_mlp_output = None
         momentum_encoder_mlp_output = torch.tensor([]).to(device)
-        for queue_entry in self.queue:
-            momentum_encoder_mlp_output = torch.hstack((momentum_encoder_mlp_output, self.momentum_encoder_mlp(queue_entry)))  #maybe hstack?
-        return encoder_mlp_output, momentum_encoder_mlp_output
+        for index, queue_entry in enumerate(self.queue):
+            mlp_output = self.momentum_encoder_mlp(queue_entry)
+            if index == self.getIndexOfNewestQueueEntry(): #if it's part of the positive samples (done for simpler access later)
+                positive_mlp_output = mlp_output
+            else:
+                momentum_encoder_mlp_output = torch.hstack((momentum_encoder_mlp_output, mlp_output))  # maybe hstack?
+        #momentum_encoder_mlp_output = []
+        #for queue_entry in self.queue:
+        #    momentum_encoder_mlp_output.append(self.momentum_encoder_mlp(queue_entry))
+        return encoder_mlp_output, momentum_encoder_mlp_output, positive_mlp_output
 
     def update_momentum_encoder(self):
         #update momentum_encoder weights by taking the weighted average of the current weights and the new encoder weights
@@ -59,6 +69,14 @@ class MoCoModel(nn.Module):
             param=self.update_weight * param + (1-self.update_weight)*encoder_params[name]
 
         #need to verify that this does the intended thing
+    def getNewestEmbeddings(self):
+        if len(self.queue)<self.max_queue_size:
+            return self.queue[-1]
+        else:
+            return self.queue[(self.current_index-1)%self.max_queue_size] #index is moved forward AFTER updating new entry, so we need to subtract one
+
+    def getIndexOfNewestQueueEntry(self):
+        return (self.current_index-1)%self.max_queue_size
 
 #[LOAD DATA]
 dataset = load_dataset("code_search_net", "python", split="train[:5%]") #change "python" to "all" or any of the other languages to get different subset
@@ -123,7 +141,7 @@ train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size,
 model = MoCoModel(8, 0.999).to(device)
 
 #[GENERATE OPTIMIZATION STUFF]
-criterion = nn.CrossEntropyLoss()
+cross_entropy_loss = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was pretrained using Adam
 
 #[TRAINING LOOP]
@@ -132,18 +150,32 @@ for epoch in range(num_epochs):
         doc_samples = {"input_ids": torch.tensor(batch["doc_input_ids"]).to(device), "attention_mask": torch.tensor(batch["doc_attention_mask"]).to(device)}
         code_samples = {"input_ids": torch.tensor(batch["code_input_ids"].to(device)), "attention_mask": torch.tensor(batch["code_attention_mask"]).to(device)}
 
+        current_batch_size = doc_samples["input_ids"].shape[0]
+
         encoder_embeddings = model(doc_samples, code_samples)
 
-        encoder_mlp, momentum_encoder_mlp = model.mlp_forward(encoder_embeddings)
+        #encoder_mlp contains the mlp output of the queries
+        #neg_mlp_emb contains the mlp output of all of the negative keys in the queue
+        #pos_mlp_emb contains the mlp output of the positive keys
+        encoder_mlp, neg_mlp_emb, pos_mlp_emb = model.mlp_forward(encoder_embeddings)
 
         optimizer.zero_grad()
 
         #define loss
+        if neg_mlp_emb.shape[0]!=0: #need at least one negative minibatch in the queue (so we don't backprop on the first iteration)
+            l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)), pos_mlp_emb.view((current_batch_size, 128, 1))) #not really sure what this outputs, but MoCoV1 does it like this
 
+            l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), neg_mlp_emb.view((128, -1)))
 
+            logits = torch.cat((l_pos, l_neg), dim=1)
 
-        optimizer.step()
-        model.update_momentum_encoder()
+            labels = torch.zeros(current_batch_size)
+            loss = cross_entropy_loss(logits/temperature, labels)
+
+            loss.backward()
+            optimizer.step()
+
+            model.update_momentum_encoder()
 
 
 
