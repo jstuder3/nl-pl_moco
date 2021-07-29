@@ -3,6 +3,7 @@
 import torch
 #import transformers
 from torch import nn
+import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer, AdamW
 from datasets import load_dataset
 
@@ -158,6 +159,12 @@ for epoch in range(num_epochs):
         #neg_mlp_emb contains the mlp output of all of the negative keys in the queue
         #pos_mlp_emb contains the mlp output of the positive keys
         encoder_mlp, neg_mlp_emb, pos_mlp_emb = model.mlp_forward(encoder_embeddings)
+
+        #normalize the length of the embeddings (we want them to be unit vectors for cosine similarity to work correctly)
+        encoder_mlp = F.normalize(encoder_mlp, p=2, dim=1)
+        if neg_mlp_emb.shape[0] != 0: #only normalize if non-empty, otherwise normalize() will throw an error
+            neg_mlp_emb = F.normalize(neg_mlp_emb, p=2, dim=1)
+        pos_mlp_emb = F.normalize(pos_mlp_emb, p=2, dim=1)
 
         optimizer.zero_grad()
 
