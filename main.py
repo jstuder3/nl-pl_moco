@@ -4,25 +4,32 @@ import torch
 # import transformers
 from torch import nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer, AdamW
+from torch.utils.tensorboard import SummaryWriter
+from transformers import AutoModel, AutoTokenizer
 from datasets import load_dataset
+import time
 
 # [HYPERPARAMETERS]
-num_epochs = 1
+num_epochs = 10
 learning_rate = 5e-4 # see CodeBERT paper
 batch_size=2 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
-queue_size = 200 # limits the number of negative sample batches in the queue
+queue_size = 32 # limits the number of negative sample batches in the queue
 momentum_update_weight=0.999 # see MoCoV1
 model_name = "microsoft/codebert-base"
 
+validation_batch_size=8
+
 device="cuda" if torch.cuda.is_available() else "cpu"
 
-#[MODEL DEFINITION]
+# used for tensorboard logging
+writer = SummaryWriter()
+
+# [MODEL DEFINITION]
 class MoCoModel(nn.Module):
     def __init__(self, max_queue_size, update_weight):
         super(MoCoModel, self).__init__()
-        #initialize all the parts of MoCoV2
+        # initialize all the parts of MoCoV2
         self.encoder = AutoModel.from_pretrained(model_name)
         self.momentum_encoder = AutoModel.from_pretrained(model_name)
         self.queue = []
@@ -36,13 +43,16 @@ class MoCoModel(nn.Module):
                                          nn.ReLU(),
                                          nn.Linear(2048, 128))
 
-    def forward(self, encoder_input, momentum_encoder_input):
+    def forward(self, encoder_input, momentum_encoder_input, isInference=False):
         # note entirely sure but I think I may only need the "pooler_output" [bs, 768] and not the "last_hidden_state" [bs, 512, 768]
         encoder_output = self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])["pooler_output"]
 
         # we save some memory by immediately detaching the momentum encoder output.
         # we don't need the computation graph of that because we won't backprop through the momentum encoder
-        momentum_encoder_output = self.momentum_encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"].detach()
+        if isInference: #use the encoder
+            momentum_encoder_output = self.encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"].detach()
+        else: #use the momentum encoder
+            momentum_encoder_output = self.momentum_encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"].detach()
 
         return encoder_output, momentum_encoder_output
 
@@ -93,9 +103,11 @@ class MoCoModel(nn.Module):
         return queueIsFull # returning this isn't necessary but might be useful
 
 # [LOAD DATA]
-dataset = load_dataset("code_search_net", "python", split="train[:5%]") #change "python" to "all" or any of the other languages to get different subset
+train_data_raw = load_dataset("code_search_net", "python", split="train[:1%]") #change "python" to "all" or any of the other languages to get different subset
 # this returns a dictionary (for split "train", "validation", "test" or all of them if none selected) with several keys, but we only really care about "func_code_tokens" and
 # "func_documentation_tokens", which both return a list of tokens (strings)
+
+val_data_raw = load_dataset("code_search_net", "python", split="validation[:1%]")
 
 # [FILTERING AND PREPROCESSING]
 
@@ -116,14 +128,20 @@ def joinCodeTokens(dict):
     dict["func_code_string_cleaned"]=concatenated_tokens
     return dict
 
-dataset=dataset.map(shorten_data)
-dataset=dataset.map(joinCodeTokens)
+train_data_raw=train_data_raw.map(shorten_data)
+train_data_raw=train_data_raw.map(joinCodeTokens)
+
+val_data_raw=val_data_raw.map(shorten_data)
+val_data_raw=val_data_raw.map(joinCodeTokens)
 
 # [TOKENIZE DATA]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-train_docs_tokens = tokenizer(dataset["func_documentation_string_shortened"], truncation=True, padding=True)
-train_code_tokens = tokenizer(dataset["func_code_string_cleaned"], truncation=True, padding=True)
+train_docs_tokens = tokenizer(train_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
+train_code_tokens = tokenizer(train_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
+
+val_docs_tokens = tokenizer(val_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
+val_code_tokens = tokenizer(val_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
 
 # [CREATE TRAIN DATASET OBJECT]
 
@@ -147,8 +165,11 @@ class CodeSearchNetDataset(torch.utils.data.Dataset):
 
 train_dataset = CodeSearchNetDataset(train_docs_tokens, train_code_tokens)
 
+val_dataset = CodeSearchNetDataset(val_docs_tokens, val_code_tokens)
+
 train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 #this expects an entry in the dict that is called "label"
+val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=validation_batch_size, shuffle=False)
 
 #[GENERATE MODEL]
 model = MoCoModel(queue_size, momentum_update_weight).to(device)
@@ -158,62 +179,115 @@ cross_entropy_loss = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) #CodeBERT was pretrained using Adam
 
 # [TRAINING LOOP]
+training_start_time=time.time()
+
 for epoch in range(num_epochs):
+    model.train()
+    epoch_time=time.time()
     for i, batch in enumerate(train_loader):
+        if i%1==0: #ONLY USED FOR DEBUGGING PURPOSES TO SKIP TRAINING DATA!!!
+            # [PUSH SAMPLES TO GPU]
+            doc_samples = {"input_ids": batch["doc_input_ids"].to(device), "attention_mask": batch["doc_attention_mask"].to(device)}
+            code_samples = {"input_ids": batch["code_input_ids"].to(device), "attention_mask": batch["code_attention_mask"].to(device)}
 
+            current_batch_size = doc_samples["input_ids"].shape[0]
+
+            # [FORWARD PASS]
+
+            # compute outputs of finetuned CodeBERT encoder and momentum encoder
+            encoder_embeddings, positive_momentum_encoder_embeddings = model(doc_samples, code_samples)
+
+            # encoder_mlp contains the mlp output of the queries
+            # pos_mlp_emb contains the mlp output of the positive keys
+            # neg_mlp_emb contains the mlp output of all of the negative keys in the queue
+            encoder_mlp, pos_mlp_emb, neg_mlp_emb = model.mlp_forward(encoder_embeddings, positive_momentum_encoder_embeddings)
+
+            # normalize the length of the embeddings (we want them to be unit vectors for cosine similarity to work correctly)
+            encoder_mlp = F.normalize(encoder_mlp, p=2, dim=1)
+            if neg_mlp_emb.shape[0] != 0: # only normalize if non-empty, otherwise normalize() will throw an error
+                neg_mlp_emb = F.normalize(neg_mlp_emb, p=2, dim=1)
+            pos_mlp_emb = F.normalize(pos_mlp_emb, p=2, dim=1)
+
+            # [COMPUTE LOSS]
+
+            # clear previous gradients
+            optimizer.zero_grad()
+
+            # compute similarity of positive NL/PL pairs
+            l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)), pos_mlp_emb.view((current_batch_size, 128, 1)))
+
+            logits = None
+            if neg_mlp_emb.shape[0] != 0:
+                # compute similarity of negaitve NL/PL pairs and concatenate with l_pos to get logits
+                l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), torch.transpose(neg_mlp_emb, 0, 1))
+                logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
+            else:
+                logits = l_pos.view((current_batch_size, 1))
+
+            # torch.zeros((current_batch_size, 1), dtype=torch.LongTensor).to(device) #this function has only very limited
+            # function signature overloads, and just converting to torch.LongTensor throws an error somehow...
+
+            # labels: l_pos should always contain the smallest values
+            labels = torch.tensor([0 for h in range(current_batch_size)]).to(device)  # ugly but does the job
+
+            loss = cross_entropy_loss(logits/temperature, labels)
+            print(f"Epoch {epoch}, batch {i}/{len(train_loader)}: Loss={loss.item():.4f}, Epoch: {time.time()-epoch_time:.1f}s<<{(1-((i+1)/len(train_loader)))*(time.time()-epoch_time)/((i+1)/len(train_loader)):.1f}s, Total: {time.time()-training_start_time:.1f}s")
+
+            # [BACKPROPAGATION / WEIGHT UPDATES]
+            loss.backward()
+            optimizer.step()
+
+            # apply a weighted average update on the momentum encoder ("momentum update")
+            model.update_momentum_encoder()
+
+            # update the queue
+            model.replaceOldestQueueEntry(positive_momentum_encoder_embeddings)
+
+            # update tensorboard
+            writer.add_scalar("Loss/training", loss.item(), len(train_loader)*epoch + i)
+
+    # [VALIDATION LOOP] (after each epoch)
+    model.eval()
+    docs_emb_list=torch.tensor([]).to(device)
+    code_emb_list=torch.tensor([]).to(device)
+    for i, batch in enumerate(val_loader):
+        print(f"Validation: {i}/{len(val_loader)}")
         # [PUSH SAMPLES TO GPU]
-        doc_samples = {"input_ids": batch["doc_input_ids"].to(device), "attention_mask": batch["doc_attention_mask"].to(device)}
-        code_samples = {"input_ids": batch["code_input_ids"].to(device), "attention_mask": batch["code_attention_mask"].to(device)}
-
-        current_batch_size = doc_samples["input_ids"].shape[0]
+        doc_samples = {"input_ids": batch["doc_input_ids"].to(device),
+                       "attention_mask": batch["doc_attention_mask"].to(device)}
+        code_samples = {"input_ids": batch["code_input_ids"].to(device),
+                        "attention_mask": batch["code_attention_mask"].to(device)}
 
         # [FORWARD PASS]
+        docs_embeddings=None
+        code_embeddings=None
+        with torch.no_grad():
+            docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=True)
+            #normalize to ensure correct cosine similarity
+            docs_embeddings=F.normalize(docs_embeddings, p=2, dim=1)
+            code_embeddings=F.normalize(code_embeddings, p=2, dim=1)
 
-        # compute outputs of finetuned CodeBERT encoder and momentum encoder
-        encoder_embeddings, positive_momentum_encoder_embeddings = model(doc_samples, code_samples)
+        # we need to find the best match for each NL sample in the entire validation set, so store everything for now
+        # docs_emb_list.append(docs_embeddings)
+        # code_emb_list.append(code_emb_list)
+        docs_emb_list=torch.cat((docs_emb_list, docs_embeddings), dim=0)
+        code_emb_list=torch.cat((code_emb_list, code_embeddings), dim=0)
 
-        # encoder_mlp contains the mlp output of the queries
-        # pos_mlp_emb contains the mlp output of the positive keys
-        # neg_mlp_emb contains the mlp output of all of the negative keys in the queue
-        encoder_mlp, pos_mlp_emb, neg_mlp_emb = model.mlp_forward(encoder_embeddings, positive_momentum_encoder_embeddings)
+    # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
-        # normalize the length of the embeddings (we want them to be unit vectors for cosine similarity to work correctly)
-        encoder_mlp = F.normalize(encoder_mlp, p=2, dim=1)
-        if neg_mlp_emb.shape[0] != 0: # only normalize if non-empty, otherwise normalize() will throw an error
-            neg_mlp_emb = F.normalize(neg_mlp_emb, p=2, dim=1)
-        pos_mlp_emb = F.normalize(pos_mlp_emb, p=2, dim=1)
+    assert(docs_emb_list.shape==code_emb_list.shape)
+    assert(docs_emb_list.shape[1]==768) # make sure we use the correct embeddings
 
-        # [COMPUTE LOSS]
+    logits=torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1))
 
-        # clear previous gradients
-        optimizer.zero_grad()
+    selection = torch.argmax(logits, dim=1)
 
-        # compute similarity of positive NL/PL pairs
-        l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)), pos_mlp_emb.view((current_batch_size, 128, 1)))
+    # the correct guess is always on the diagonal of the logits matrix
+    label = torch.tensor([x for x in range(docs_emb_list.shape[0])]).to(device)
 
-        logits = None
-        if neg_mlp_emb.shape[0] != 0:
-            # compute similarity of negaitve NL/PL pairs and concatenate with l_pos to get logits
-            l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), torch.transpose(neg_mlp_emb, 0, 1))
-            logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
-        else:
-            logits = l_pos.view((current_batch_size, 1))
+    top_1_correct_guesses = torch.sum(logits==label)
 
-        # torch.zeros((current_batch_size, 1), dtype=torch.LongTensor).to(device) #this function has only very limited
-        # function signature overloads, and just converting to torch.LongTensor throws an error somehow...
+    top_1_accuracy = top_1_correct_guesses/docs_emb_list.shape[0] # accuracy is the fraction of correct guesses
 
-        # labels: l_pos should always contain the smallest values
-        labels = torch.tensor([0 for h in range(current_batch_size)]).to(device)  # ugly but does the job
-
-        loss = cross_entropy_loss(logits/temperature, labels)
-        print(loss.item())
-
-        # [BACKPROPAGATION / WEIGHT UPDATES]
-        loss.backward()
-        optimizer.step()
-
-        # apply a weighted average update on the momentum encoder ("momentum update")
-        model.update_momentum_encoder()
-
-        #update the queue
-        model.replaceOldestQueueEntry(positive_momentum_encoder_embeddings)
+    print(f"Validation accuracy: {top_1_accuracy*100:.3f}%")
+    writer.add_scalar("Accuracy/validation", top_1_accuracy*100, epoch)
