@@ -12,13 +12,17 @@ import time
 # [HYPERPARAMETERS]
 num_epochs = 10
 learning_rate = 5e-4 # see CodeBERT paper
-batch_size=1 # see CodeBERT paper
+batch_size=4 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
-queue_size = 32 # limits the number of negative sample batches in the queue
+queue_size = 128 # limits the number of negative sample batches in the queue
 momentum_update_weight=0.999 # see MoCoV1
 model_name = "microsoft/codebert-base"
 
-validation_batch_size=8
+#limit how much of the total data we use
+train_split_limit="5%"
+validation_split_limit="10%"
+
+validation_batch_size=16
 
 device="cuda" if torch.cuda.is_available() else "cpu"
 
@@ -103,11 +107,11 @@ class MoCoModel(nn.Module):
         return queueIsFull # returning this isn't necessary but might be useful
 
 # [LOAD DATA]
-train_data_raw = load_dataset("code_search_net", "python", split="train[:5%]") #change "python" to "all" or any of the other languages to get different subset
+train_data_raw = load_dataset("code_search_net", "python", split=f"train[:{train_split_limit}]") #change "python" to "all" or any of the other languages to get different subset
 # this returns a dictionary (for split "train", "validation", "test" or all of them if none selected) with several keys, but we only really care about "func_code_tokens" and
 # "func_documentation_tokens", which both return a list of tokens (strings)
 
-val_data_raw = load_dataset("code_search_net", "python", split="validation[:100%]")
+val_data_raw = load_dataset("code_search_net", "python", split=f"validation[:{validation_split_limit}]")
 
 # [FILTERING AND PREPROCESSING]
 
