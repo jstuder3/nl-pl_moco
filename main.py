@@ -12,7 +12,7 @@ import time
 # [HYPERPARAMETERS]
 num_epochs = 10
 learning_rate = 5e-4 # see CodeBERT paper
-batch_size=2 # see CodeBERT paper
+batch_size=1 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
 queue_size = 32 # limits the number of negative sample batches in the queue
 momentum_update_weight=0.999 # see MoCoV1
@@ -103,11 +103,11 @@ class MoCoModel(nn.Module):
         return queueIsFull # returning this isn't necessary but might be useful
 
 # [LOAD DATA]
-train_data_raw = load_dataset("code_search_net", "python", split="train[:1%]") #change "python" to "all" or any of the other languages to get different subset
+train_data_raw = load_dataset("code_search_net", "python", split="train[:5%]") #change "python" to "all" or any of the other languages to get different subset
 # this returns a dictionary (for split "train", "validation", "test" or all of them if none selected) with several keys, but we only really care about "func_code_tokens" and
 # "func_documentation_tokens", which both return a list of tokens (strings)
 
-val_data_raw = load_dataset("code_search_net", "python", split="validation[:1%]")
+val_data_raw = load_dataset("code_search_net", "python", split="validation[:100%]")
 
 # [FILTERING AND PREPROCESSING]
 
@@ -154,8 +154,10 @@ class CodeSearchNetDataset(torch.utils.data.Dataset):
         # item=[]
         # item.append({key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()})
         # item.append({key: torch.tensor(val[index]) for key, val in self.code_tokens.items()})
-        item = {"doc_"+key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()}
-        item = item | {"code_"+key: torch.tensor(val[index]) for key, val in self.code_tokens.items()} #this syntax requires python 3.9+
+        item1 = {"doc_"+key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()}
+        item2 = {"code_"+key: torch.tensor(val[index]) for key, val in self.code_tokens.items()}
+        item = {**item1, **item2} # only requires python 3.5+
+        # item = item | {"code_"+key: torch.tensor(val[index]) for key, val in self.code_tokens.items()} #this syntax requires python 3.9+
         # item = {"input_ids": self.doc_tokens["input_ids"][index], "attention_mask": self.doc_tokens["attention_mask"][index], "label": self.code_tokens["input_ids"][index], "label_attention_mask": self.code_tokens["attention_mask"][index]}
         return item
 
