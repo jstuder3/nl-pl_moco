@@ -11,16 +11,16 @@ import time
 
 # [HYPERPARAMETERS]
 num_epochs = 10
-learning_rate = 5e-4 # see CodeBERT paper
+learning_rate = 1e-5 # see CodeBERT paper
 batch_size=4 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
-queue_size = 128 # limits the number of negative sample batches in the queue
+queue_size = 64 # limits the number of negative sample batches in the queue
 momentum_update_weight=0.999 # see MoCoV1
 model_name = "microsoft/codebert-base"
 
 #limit how much of the total data we use
-train_split_limit="5%"
-validation_split_limit="20%"
+train_split_limit="1%"
+validation_split_limit="5%"
 
 validation_batch_size=32
 
@@ -237,6 +237,7 @@ for epoch in range(num_epochs):
             labels = torch.tensor([0 for h in range(current_batch_size)]).to(device)  # ugly but does the job
 
             loss = cross_entropy_loss(logits/temperature, labels)
+            
             print(f"Epoch {epoch}, batch {i}/{len(train_loader)}: Loss={loss.item():.4f}, Epoch: {time.time()-epoch_time:.1f}s<<{(1-((i+1)/len(train_loader)))*(time.time()-epoch_time)/((i+1)/len(train_loader)):.1f}s, Total: {time.time()-training_start_time:.1f}s")
 
             # [BACKPROPAGATION / WEIGHT UPDATES]
