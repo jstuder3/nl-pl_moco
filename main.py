@@ -14,13 +14,13 @@ num_epochs = 10
 learning_rate = 5e-4 # see CodeBERT paper
 batch_size=4 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
-queue_size = 64 # limits the number of negative sample batches in the queue
+queue_size = 128 # limits the number of negative sample batches in the queue
 momentum_update_weight=0.999 # see MoCoV1
 model_name = "microsoft/codebert-base"
 
 #limit how much of the total data we use
-train_split_limit="2%"
-validation_split_limit="10%"
+train_split_limit="5%"
+validation_split_limit="20%"
 
 validation_batch_size=32
 
