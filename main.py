@@ -337,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--validation_split_size", type=int)
     args=parser.parse_args()
 
-    print(f"[LOGGING] Received as input parameters: {vars(args)}")
+    print(f"[HYPERPARAMETERS] Received as input parameters: {vars(args)}")
 
     if args.num_epochs!=None:
         num_epochs=args.num_epochs
@@ -356,7 +356,7 @@ if __name__ == "__main__":
     if args.validation_split_size!=None:
         validation_split_size=args.validation_split_size
 
-    print(f"[LOGGING] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}")
 
     execute()
 
