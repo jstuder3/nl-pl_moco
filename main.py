@@ -12,20 +12,22 @@ import argparse
 
 # [HYPERPARAMETERS] (default values, can get overwritten by named call arguments)
 num_epochs = 10
-batch_size=1 # see CodeBERT paper
+batch_size=4 # see CodeBERT paper
 learning_rate = 1e-5 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
 queue_size = 32 # limits the number of negative sample batches in the queue
 momentum_update_weight=0.999 # see MoCoV1
 model_name = "microsoft/codebert-base"
 
-#limit how much of the total data we use
-train_split_size=1
-validation_split_size=5
+# limit how much of the total data we use
+train_split_size=5
+validation_split_size=20
 
-validation_batch_size=8
+validation_batch_size=32
 
 device="cuda" if torch.cuda.is_available() else "cpu"
+
+output_delay_time=10
 
 # used for tensorboard logging
 writer = SummaryWriter()
@@ -109,6 +111,9 @@ class MoCoModel(nn.Module):
 
         return queueIsFull # returning this isn't necessary but might be useful
 
+    def currentQueueSize(self):
+        return len(self.queue)
+
 # [DATASET DEFINITION]
 class CodeSearchNetDataset(torch.utils.data.Dataset):
     def __init__(self, doc_tokens, code_tokens):
@@ -180,7 +185,7 @@ def execute():
     val_dataset = CodeSearchNetDataset(val_docs_tokens, val_code_tokens)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    #this expects an entry in the dict that is called "label"
+    # this expects an entry in the dict that is called "label"
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=validation_batch_size, shuffle=False)
 
     # [GENERATE MODEL]
@@ -193,12 +198,13 @@ def execute():
     # [TRAINING LOOP]
     training_start_time=time.time()
     consoleOutputTime=time.time()
-
+    queueHasNeverBeenFull=True
     for epoch in range(num_epochs):
+        print(f"Starting training of epoch {epoch}...")
         model.train()
         epoch_time=time.time()
         for i, batch in enumerate(train_loader):
-            if i%1==0: #ONLY USED FOR DEBUGGING PURPOSES TO SKIP TRAINING DATA!!!
+            if i%1==0: # ONLY USED FOR DEBUGGING PURPOSES TO SKIP TRAINING DATA!!!
                 # [PUSH SAMPLES TO GPU]
                 doc_samples = {"input_ids": batch["doc_input_ids"].to(device), "attention_mask": batch["doc_attention_mask"].to(device)}
                 code_samples = {"input_ids": batch["code_input_ids"].to(device), "attention_mask": batch["code_attention_mask"].to(device)}
@@ -245,7 +251,7 @@ def execute():
 
                 loss = cross_entropy_loss(logits/temperature, labels)
 
-                if time.time()-consoleOutputTime > 100: # output to console if a certain amount of time has passed
+                if time.time()-consoleOutputTime > output_delay_time: # output to console if a certain amount of time has passed
                     print(f"Epoch {epoch}, batch {i}/{len(train_loader)}: Loss={loss.item():.4f}, Epoch: {time.time()-epoch_time:.1f}s<<{(1-((i+1)/len(train_loader)))*(time.time()-epoch_time)/((i+1)/len(train_loader)):.1f}s, Total: {time.time()-training_start_time:.1f}s")
                     consoleOutputTime=time.time()
 
@@ -258,6 +264,10 @@ def execute():
 
                 # update the queue
                 model.replaceOldestQueueEntry(positive_momentum_encoder_embeddings)
+                if queueHasNeverBeenFull and model.currentQueueSize()>=model.max_queue_size:
+                    cqs=model.currentQueueSize()
+                    print(f"Queue is now full for the first time with {cqs} batches or roughly {batch_size*cqs} samples")
+                    queueHasNeverBeenFull=False
 
                 # update tensorboard
                 writer.add_scalar("Loss/training", loss.item(), len(train_loader)*epoch + i)
@@ -266,8 +276,14 @@ def execute():
         model.eval()
         docs_emb_list=torch.tensor([]).to(device)
         code_emb_list=torch.tensor([]).to(device)
+        val_start_time=time.time()
+        consoleOutputTime=time.time()
+        print(f"Starting evaluation after epoch {epoch}, after having seen {epoch*len(train_loader)*batch_size+(i+1)*batch_size} samples (or {epoch*len(train_loader)+(i+1)} iterations at batch size {batch_size})...")
         for i, batch in enumerate(val_loader):
-            print(f"Validation: {i}/{len(val_loader)}")
+            if time.time()-consoleOutputTime>output_delay_time:
+                print(f"Validation: {i}/{len(val_loader)}, {time.time()-val_start_time:.1f}s<<{(1-((i+1)/len(val_loader)))*(time.time()-val_start_time)/((i+1)/len(val_loader)):.1f}s, Total: {time.time()-training_start_time:.1f}s")
+                consoleOutputTime=time.time()
+
             # [PUSH SAMPLES TO GPU]
             doc_samples = {"input_ids": batch["doc_input_ids"].to(device),
                            "attention_mask": batch["doc_attention_mask"].to(device)}
