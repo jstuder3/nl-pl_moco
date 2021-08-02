@@ -318,10 +318,12 @@ def execute():
         assert(docs_emb_list.shape==code_emb_list.shape)
         assert(docs_emb_list.shape[1]==768) # make sure we use the correct embeddings
 
+        # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
         logits=torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1))
 
         selection = torch.argmax(logits, dim=1)
 
+        # [COMPUTE TOP1 ACCURACY]
         # the correct guess is always on the diagonal of the logits matrix
         diagonal_label_tensor = torch.tensor([x for x in range(docs_emb_list.shape[0])]).to(device)
 
@@ -329,8 +331,8 @@ def execute():
 
         top_1_accuracy = top_1_correct_guesses/docs_emb_list.shape[0] # accuracy is the fraction of correct guesses
 
-        print(f"Validation accuracy: {top_1_accuracy*100:.3f}%")
-        writer.add_scalar("Accuracy/validation", top_1_accuracy*100, epoch)
+        print(f"Validation top_1 accuracy: {top_1_accuracy*100:.3f}%")
+        writer.add_scalar("Accuracy/validation/top_1", top_1_accuracy*100, epoch)
 
         # [COMPUTE MEAN RECIPROCAL ACCURACY] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
@@ -341,8 +343,17 @@ def execute():
         print(f"Validation MRR: {mrr:.4f}")
         writer.add_scalar("MRR/validation", mrr, epoch)
 
-        # what I want: for each NL embedding, find the similarity of it to the positive PL embedding
-        # to that end, first extract the similarity to the positive embeddings from each similarity tensor in logits
+        # [COMPUTE TOP5 AND TOP10 ACCURACY]
+        # we can reuse the computation for the MRR
+        top_5_correct_guesses=torch.sum(ranks<=5)
+        top_10_correct_guesses=torch.sum(ranks<=10)
+
+        top_5_accuracy=top_5_correct_guesses/docs_emb_list.shape[0]
+        top_10_accuracy=top_10_correct_guesses/docs_emb_list.shape[0]
+        print(f"Validation top_5 accuracy: {top_5_accuracy*100:.3f}%")
+        print(f"Validation top_10 accuracy: {top_10_accuracy * 100:.3f}%")
+        writer.add_scalar("Accuracy/validation/top_5", top_5_accuracy * 100, epoch)
+        writer.add_scalar("Accuracy/validation/top_10", top_10_accuracy * 100, epoch)
 
 
 
