@@ -65,19 +65,22 @@ class MoCoModel(nn.Module):
 
         return encoder_output, momentum_encoder_output
 
-    def mlp_forward(self, encoder_mlp_input, positive_momentum_encoder_mlp_input):
+    def mlp_forward(self, encoder_mlp_input, positive_momentum_encoder_mlp_input, isInference=False):
         encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
         positive_mlp_output = self.momentum_encoder_mlp(positive_momentum_encoder_mlp_input)
-
-        momentum_encoder_mlp_output = torch.tensor([]).to(device)
-        # the queue only contains negative samples
-        for index, queue_entry in enumerate(self.queue):
-            mlp_output = self.momentum_encoder_mlp(queue_entry)
-            momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)
-        # momentum_encoder_mlp_output = []
-        # for queue_entry in self.queue:
-        #     momentum_encoder_mlp_output.append(self.momentum_encoder_mlp(queue_entry))
-        return encoder_mlp_output, positive_mlp_output, momentum_encoder_mlp_output
+        #only compute the mlp forwards of the queue entries if we're in training
+        if not isInference:
+            momentum_encoder_mlp_output = torch.tensor([]).to(device)
+            # the queue only contains negative samples
+            for index, queue_entry in enumerate(self.queue):
+                mlp_output = self.momentum_encoder_mlp(queue_entry)
+                momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)
+            # momentum_encoder_mlp_output = []
+            # for queue_entry in self.queue:
+            #     momentum_encoder_mlp_output.append(self.momentum_encoder_mlp(queue_entry))
+            return encoder_mlp_output, positive_mlp_output, momentum_encoder_mlp_output
+        else: #isInference=True
+            return encoder_mlp_output, positive_mlp_output
 
     def update_momentum_encoder(self):
         # update momentum_encoder weights by taking the weighted average of the current weights and the new encoder weights
@@ -291,24 +294,27 @@ def execute():
                             "attention_mask": batch["code_attention_mask"].to(device)}
 
             # [FORWARD PASS]
-            docs_embeddings=None
-            code_embeddings=None
             with torch.no_grad():
-                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=True)
+                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=False) #set to false for experimentation purposes
+                docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
                 #normalize to ensure correct cosine similarity
-                docs_embeddings=F.normalize(docs_embeddings, p=2, dim=1)
-                code_embeddings=F.normalize(code_embeddings, p=2, dim=1)
+                #docs_embeddings=F.normalize(docs_embeddings, p=2, dim=1)
+                #code_embeddings=F.normalize(code_embeddings, p=2, dim=1)
+                docs_mlp_embeddings=F.normalize(docs_mlp_embeddings, p=2, dim=1)
+                code_mlp_embeddings=F.normlaize(code_mlp_embeddings, p=2, dim=1)
 
             # we need to find the best match for each NL sample in the entire validation set, so store everything for now
             # docs_emb_list.append(docs_embeddings)
             # code_emb_list.append(code_emb_list)
-            docs_emb_list=torch.cat((docs_emb_list, docs_embeddings), dim=0)
-            code_emb_list=torch.cat((code_emb_list, code_embeddings), dim=0)
+            #docs_emb_list=torch.cat((docs_emb_list, docs_embeddings), dim=0)
+            #code_emb_list=torch.cat((code_emb_list, code_embeddings), dim=0)
+            docs_emb_list = torch.cat((docs_emb_list, docs_mlp_embeddings), dim=0)
+            code_emb_list=torch.cat((code_emb_list, code_mlp_embeddings), dim=0)
 
         # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
         assert(docs_emb_list.shape==code_emb_list.shape)
-        assert(docs_emb_list.shape[1]==768) # make sure we use the correct embeddings
+        #assert(docs_emb_list.shape[1]==768) # make sure we use the correct embeddings
 
         logits=torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1))
 
