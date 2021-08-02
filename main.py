@@ -23,13 +23,13 @@ model_name = "microsoft/codebert-base"
 train_split_size=1
 validation_split_size=1
 
-validation_batch_size=32
+validation_batch_size=16
 
 device="cuda" if torch.cuda.is_available() else "cpu"
 
 output_delay_time=50
 
-DEBUG_data_skip_interval=1 # used to skip data during training to get to validation loop faster
+DEBUG_data_skip_interval=100 # used to skip data during training to get to validation loop faster
 
 # used for tensorboard logging
 writer = SummaryWriter()
@@ -297,8 +297,8 @@ def execute():
 
             # [FORWARD PASS]
             with torch.no_grad():
-                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=False) #set to false for experimentation purposes
-                docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
+                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=True) #set to false for experimentation purposes
+                #docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
                 # normalize to ensure correct cosine similarity
                 docs_embeddings=F.normalize(docs_embeddings, p=2, dim=1)
                 code_embeddings=F.normalize(code_embeddings, p=2, dim=1)
@@ -334,10 +334,11 @@ def execute():
         print(f"Validation top_1 accuracy: {top_1_accuracy*100:.3f}%")
         writer.add_scalar("Accuracy/validation/top_1", top_1_accuracy*100, epoch)
 
-        # [COMPUTE MEAN RECIPROCAL ACCURACY] (MRR)
+        # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
         diagonal_values=torch.diagonal(logits)
-        ranks=torch.sum(logits>=diagonal_values, dim=1) # sum up elements with >= similarity than positive embedding
+        #need to enforce column-wise broadcasting
+        ranks=torch.sum(logits>=torch.transpose(diagonal_values.view(1, -1), 0, 1), dim=1) # sum up elements with >= similarity than positive embedding
         mrr=(1/ranks.shape[0])*torch.sum(1/ranks)
 
         print(f"Validation MRR: {mrr:.4f}")
