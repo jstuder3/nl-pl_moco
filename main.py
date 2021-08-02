@@ -12,7 +12,7 @@ import argparse
 
 # [HYPERPARAMETERS] (default values, can get overwritten by named call arguments)
 num_epochs = 10
-batch_size=4 # see CodeBERT paper
+batch_size=2 # see CodeBERT paper
 learning_rate = 1e-5 # see CodeBERT paper
 temperature=0.07 # see MoCoV1
 queue_size = 32 # limits the number of negative sample batches in the queue
@@ -20,14 +20,16 @@ momentum_update_weight=0.999 # see MoCoV1
 model_name = "microsoft/codebert-base"
 
 # limit how much of the total data we use
-train_split_size=5
-validation_split_size=20
+train_split_size=1
+validation_split_size=1
 
 validation_batch_size=32
 
 device="cuda" if torch.cuda.is_available() else "cpu"
 
-output_delay_time=10
+output_delay_time=50
+
+DEBUG_data_skip_interval=1 # used to skip data during training to get to validation loop faster
 
 # used for tensorboard logging
 writer = SummaryWriter()
@@ -207,7 +209,7 @@ def execute():
         model.train()
         epoch_time=time.time()
         for i, batch in enumerate(train_loader):
-            if i%1==0: # ONLY USED FOR DEBUGGING PURPOSES TO SKIP TRAINING DATA!!!
+            if i%DEBUG_data_skip_interval==0: # ONLY USED FOR DEBUGGING PURPOSES TO SKIP TRAINING DATA!!!
                 # [PUSH SAMPLES TO GPU]
                 doc_samples = {"input_ids": batch["doc_input_ids"].to(device), "attention_mask": batch["doc_attention_mask"].to(device)}
                 code_samples = {"input_ids": batch["code_input_ids"].to(device), "attention_mask": batch["code_attention_mask"].to(device)}
@@ -297,38 +299,53 @@ def execute():
             with torch.no_grad():
                 docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=False) #set to false for experimentation purposes
                 docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
-                #normalize to ensure correct cosine similarity
-                #docs_embeddings=F.normalize(docs_embeddings, p=2, dim=1)
-                #code_embeddings=F.normalize(code_embeddings, p=2, dim=1)
-                docs_mlp_embeddings=F.normalize(docs_mlp_embeddings, p=2, dim=1)
-                code_mlp_embeddings=F.normlaize(code_mlp_embeddings, p=2, dim=1)
+                # normalize to ensure correct cosine similarity
+                docs_embeddings=F.normalize(docs_embeddings, p=2, dim=1)
+                code_embeddings=F.normalize(code_embeddings, p=2, dim=1)
+                #docs_mlp_embeddings=F.normalize(docs_mlp_embeddings, p=2, dim=1)
+                #code_mlp_embeddings=F.normalize(code_mlp_embeddings, p=2, dim=1)
 
             # we need to find the best match for each NL sample in the entire validation set, so store everything for now
             # docs_emb_list.append(docs_embeddings)
             # code_emb_list.append(code_emb_list)
-            #docs_emb_list=torch.cat((docs_emb_list, docs_embeddings), dim=0)
-            #code_emb_list=torch.cat((code_emb_list, code_embeddings), dim=0)
-            docs_emb_list = torch.cat((docs_emb_list, docs_mlp_embeddings), dim=0)
-            code_emb_list=torch.cat((code_emb_list, code_mlp_embeddings), dim=0)
+            docs_emb_list=torch.cat((docs_emb_list, docs_embeddings), dim=0)
+            code_emb_list=torch.cat((code_emb_list, code_embeddings), dim=0)
+            # docs_emb_list = torch.cat((docs_emb_list, docs_mlp_embeddings), dim=0)
+            # code_emb_list=torch.cat((code_emb_list, code_mlp_embeddings), dim=0)
 
         # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
         assert(docs_emb_list.shape==code_emb_list.shape)
-        #assert(docs_emb_list.shape[1]==768) # make sure we use the correct embeddings
+        assert(docs_emb_list.shape[1]==768) # make sure we use the correct embeddings
 
         logits=torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1))
 
         selection = torch.argmax(logits, dim=1)
 
         # the correct guess is always on the diagonal of the logits matrix
-        label = torch.tensor([x for x in range(docs_emb_list.shape[0])]).to(device)
+        diagonal_label_tensor = torch.tensor([x for x in range(docs_emb_list.shape[0])]).to(device)
 
-        top_1_correct_guesses = torch.sum(selection==label)
+        top_1_correct_guesses = torch.sum(selection==diagonal_label_tensor)
 
         top_1_accuracy = top_1_correct_guesses/docs_emb_list.shape[0] # accuracy is the fraction of correct guesses
 
         print(f"Validation accuracy: {top_1_accuracy*100:.3f}%")
         writer.add_scalar("Accuracy/validation", top_1_accuracy*100, epoch)
+
+        # [COMPUTE MEAN RECIPROCAL ACCURACY] (MRR)
+        # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
+        diagonal_values=torch.diagonal(logits)
+        ranks=torch.sum(logits>=diagonal_values, dim=1) # sum up elements with >= similarity than positive embedding
+        mrr=(1/ranks.shape[0])*torch.sum(1/ranks)
+
+        print(f"Validation MRR: {mrr:.4f}")
+        writer.add_scalar("MRR/validation", mrr, epoch)
+
+        # what I want: for each NL embedding, find the similarity of it to the positive PL embedding
+        # to that end, first extract the similarity to the positive embeddings from each similarity tensor in logits
+
+
+
 
 if __name__ == "__main__":
     # [PARSE ARGUMENTS] (if they are given, otherwise keep default value)
