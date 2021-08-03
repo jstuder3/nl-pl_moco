@@ -13,7 +13,6 @@ import sys
 
 import eda.eda as eda # Easy Data Augmentation
 
-
 # [HYPERPARAMETERS] (default values, can get overwritten by named call arguments)
 num_epochs = 10
 batch_size = 2  # see CodeBERT paper
@@ -33,18 +32,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 output_delay_time = 50
 
-DEBUG_data_skip_interval = 100  # used to skip data during training to get to validation loop faster
-
-# augmentation parameters
-alpha = 0.1  # augmentation parameter used for synonym replacement, random insertion, random swap and random deletion
-
-# download data used for augmentation from the Natural Language Toolkit
-# nltk.download("stopwords") # used to remove stopwords (words that hold very little meaning)
-#nltk.download("wordnet")  # used to find synonyms
-# nltk.download("punkt") # used to remove punctuation
-
-# used to remove punctuation
-# alphanumeric_extractor = nltk.tokenize.RegexpTokenizer(r"\w+")
+DEBUG_data_skip_interval = 1  # used to skip data during training to get to validation loop faster
 
 # used for tensorboard logging
 writer = SummaryWriter()
@@ -61,12 +49,12 @@ class MoCoModel(nn.Module):
         self.current_index = 0
         self.max_queue_size = max_queue_size
         self.update_weight = update_weight
-        self.encoder_mlp = nn.Sequential(nn.ReLU(),  # should there be a relu here or not?
+        self.encoder_mlp = nn.Sequential( # should there be a relu here or not?
                                          nn.Linear(768, 2048),
                                          nn.ReLU(),
                                          nn.Linear(2048,
                                                    128))  # 768 is output size of CodeBERT (i.e. BERT_base), 2048 is the hidden layer size MoCoV2 uses and 128 is the output size that SimCLR uses
-        self.momentum_encoder_mlp = nn.Sequential(nn.ReLU(),  # should there be a relu here or not?
+        self.momentum_encoder_mlp = nn.Sequential( # should there be a relu here or not?
                                                   nn.Linear(768, 2048),
                                                   nn.ReLU(),
                                                   nn.Linear(2048, 128))
@@ -77,7 +65,7 @@ class MoCoModel(nn.Module):
         self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])[
             "pooler_output"]
 
-        # we save some memory by immediately detaching the momentum encoder output.
+        # we save some memory by immediately detaching the momentum encoder output. (actually, we could just use "with torch.no_grad:")
         # we don't need the computation graph of that because we won't backprop through the momentum encoder
         if isInference:  # use the encoder
             momentum_encoder_output = self.encoder(input_ids=momentum_encoder_input["input_ids"],
@@ -100,9 +88,6 @@ class MoCoModel(nn.Module):
             for index, queue_entry in enumerate(self.queue):
                 mlp_output = self.momentum_encoder_mlp(queue_entry)
                 momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)
-            # momentum_encoder_mlp_output = []
-            # for queue_entry in self.queue:
-            #     momentum_encoder_mlp_output.append(self.momentum_encoder_mlp(queue_entry))
             return encoder_mlp_output, positive_mlp_output, momentum_encoder_mlp_output
         else:  # isInference=True
             return encoder_mlp_output, positive_mlp_output
@@ -119,8 +104,7 @@ class MoCoModel(nn.Module):
         if len(self.queue) < self.max_queue_size:
             return self.queue[-1]
         else:
-            return self.queue[(
-                                          self.current_index - 1) % self.max_queue_size]  # index is moved forward AFTER updating new entry, so we need to subtract one
+            return self.queue[(self.current_index - 1) % self.max_queue_size]  # index is moved forward AFTER updating new entry, so we need to subtract one
 
     def getIndexOfNewestQueueEntry(self):
         # returns the queue index of the embeddings which have been appended the most recently
@@ -151,28 +135,12 @@ class CodeSearchNetDataset(torch.utils.data.Dataset):
         self.code_tokens = code_tokens
 
     def __getitem__(self, index):
-        # item=[]
-        # item.append({key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()})
-        # item.append({key: torch.tensor(val[index]) for key, val in self.code_tokens.items()})
-        # item1 = {"doc_"+key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()}
-        # item2 = {"code_"+key: torch.tensor(val[index]) for key, val in self.code_tokens.items()}
-        # item = {**item1, **item2} # only requires python 3.5+
         item = {"doc_" + key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()}
-        item = item | {"code_" + key: torch.tensor(val[index]) for key, val in
-                       self.code_tokens.items()}  # this syntax requires python 3.9+
-        # item = {"input_ids": self.doc_tokens["input_ids"][index], "attention_mask": self.doc_tokens["attention_mask"][index], "label": self.code_tokens["input_ids"][index], "label_attention_mask": self.code_tokens["attention_mask"][index]}
+        item = item | {"code_" + key: torch.tensor(val[index]) for key, val in self.code_tokens.items()}  # this syntax requires python 3.9+
         return item
 
     def __len__(self):
         return len(self.doc_tokens["input_ids"])
-
-    # def __copy__(self):
-    #     return CodeSearchNetDataset(doc_tokens=copy.deepcopy(self.doc_tokens), code_tokens=copy.deepcopy(self.code_tokens.copy()))
-
-    # def copy(self): # returns a deep-copy of this object (i.e. same content but non-shared memory location)
-    #     super(CodeSearchNetDataset, self).copy()
-    #     return CodeSearchNetDataset(doc_tokens=copy.deepcopy(self.doc_tokens),
-    #                                 code_tokens=copy.deepcopy(self.code_tokens.copy()))
 
 
 # takes as input a dict that has a key "func_documentation_string", shortens that to the first paragraph and puts the result under the key "func_documentation_string_shortened"
@@ -182,7 +150,6 @@ def shorten_data(dict):
     dict["func_documentation_string_shortened"] = shortened_doc
     return dict
 
-
 # takes as input a dict that has a key "func_code_tokens", concatenates all the tokens and puts them into the key "func_code_tokens_concatenated"
 # a bit simpler than filtering "func_code_string" but might cause issues later because the output really isn't "perfect"
 # in the sense that it contains many unnecessary whitespaces
@@ -190,34 +157,6 @@ def joinCodeTokens(dict):
     concatenated_tokens = " ".join(dict["func_code_tokens"])
     dict["func_code_string_cleaned"] = concatenated_tokens
     return dict
-
-
-# randomly replaces non-stopwords in the documentation string with their synonyms
-# REMEMBER TO INSTALL THE NATURAL LANGUAGE TOOLKIT USING "pip install -U nltk"
-# current implementation is absurdly slow, and using  lru_cache from functools library doesn't help
-#def synonymReplacement(dict):
-    # commented-out code is my implementation, which is absurdly slow (augmenting full train set would take > 10 hours)
-
-    # no_punctuation_list = alphanumeric_extractor.tokenize(dict["func_documentation_string_shortened"])
-    # no_stop_words_list = [word for word in no_punctuation_list if not word in nltk.corpus.stopwords.words()]
-
-    # length = len(no_stop_words_list)
-    # number_of_words_to_replace=int(round(alpha*length)) # see Easy Data Augmentation paper
-    # replacement_targets=random.sample(range(0, length), number_of_words_to_replace)
-
-    ## then do the replacement magic on the selected words and put them back into the dict, then return the dict
-    # for i in replacement_targets:
-    #    synonym_set=[] #will hold all unique synonyms; we use a list instead of a set beacuse we expect there to be only few synonyms and hence sampling would be faster for a list
-    #    for elem in nltk.corpus.wordnet.synset(no_stop_words_list[i]):
-    #        synonym_name=elem.lemmas()[0].name()
-    #        if synonym_name not in synonym_set:
-    #            synonym_set.append(synonym_name) # for every Synonym object in the corpus, add only the synonym string to the set (set -> so we have no duplicates)
-    #    if len(synonym_set)>0:
-    #        chosen_synonym = random.choice(synonym_set) # take a random one of the synonym string (might be original string)
-    #        dict["func_documentation_string_shortened"] = dict["func_documentation_string_shortened"].replace(no_stop_words_list[i], chosen_synonym, 1) #replace only one appearance
-
-    # return dict
-
 
 def loadAndPreprocessData(source, language, split):
     dataset = load_dataset(source, language, split=split)
@@ -227,12 +166,11 @@ def loadAndPreprocessData(source, language, split):
 
     return dataset
 
-
 # takes in a set of preprocessed (shortened) data, then augments it if augment is set to true, tokenizes it using
 # the provided tokenizer and turns it into a CodeSearchNetDataset object and finally puts it into
 # a DataLoader object which is returned
 def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=False, augment=False):
-    # we may want to augment several times independently and the reloading the original data every time
+    # we may want to augment several times independently and reloading the original data every time
     # is the only way I could find to make sure we start from the original data every time (Datasets have no copy method)
     preprocessed_data = loadAndPreprocessData(source, language, split)
     if augment:
@@ -243,13 +181,16 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
             # augmentation for NL
             docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
             preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
-            #if augmentation_list[0]!=augmentation_list[1]:
-            #    print(f"Original:  {augmentation_list[1]}\nAugmented: {augmentation_list[0]}")
+            #if docs_augmentation_list[0]!=augmentation_list[1]:
+            #    print(f"Original:  {docs_augmentation_list[1]}\nAugmented: {docs_augmentation_list[0]}")
 
             # augmentation for code
             # for code we don't want synonym replacement or random insertion, so set the respective alphas to 0
-            code_augmentation_list = eda.eda(preprocessed_data[i]["func_code_string_cleaned"], alpha_sr=0, alpha_ri=0, num_aug=1)
-            preprocessed_data[i]["func_code_string_cleaned"]=code_augmentation_list[0]
+            # unfortunately, this removes all non-alphanumerical characters, which is unsuitable for this task
+            # code_augmentation_list = eda.eda(preprocessed_data[i]["func_code_string_cleaned"], alpha_sr=0, alpha_ri=0, num_aug=1)
+            # preprocessed_data[i]["func_code_string_cleaned"]=code_augmentation_list[0]
+            # if code_augmentation_list[0]!=code_augmentation_list[1]:
+            #    print(f"Original:  {code_augmentation_list[1]}\nAugmented: {code_augmentation_list[0]}")
     docs_tokens = tokenizer(preprocessed_data["func_documentation_string_shortened"], truncation=True, padding="max_length")
     code_tokens = tokenizer(preprocessed_data["func_code_string_cleaned"], truncation=True, padding="max_length")
     generated_dataset = CodeSearchNetDataset(docs_tokens, code_tokens)
@@ -258,45 +199,13 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
 
 
 def execute():
-    # [LOAD DATA]
-    # train_data_raw = load_dataset("code_search_net", "python", split=f"train[:{train_split_size}%]") #change "python" to "all" or any of the other languages to get different subset
-    # this returns a dictionary (for split "train", "validation", "test" or all of them if none selected) with several keys, but we only really care about "func_code_tokens" and
-    # "func_documentation_tokens", which both return a list of tokens (strings)
-
-    # val_data_raw = load_dataset("code_search_net", "python", split=f"validation[:{validation_split_size}%]")
-
-    # [FILTERING AND PREPROCESSING]
-
-    # the dataset is already prefiltered. the only thing we need to do is to shorten documentations to the first paragraph.
-    # NOTE: we can't just use the pre-tokenized column in the dataset because it does not contain empty spaces, thus potentially losing information
-
-    # train_data_raw=train_data_raw.map(shorten_data)
-    # train_data_raw=train_data_raw.map(joinCodeTokens)
-
-    # val_data_raw=val_data_raw.map(shorten_data)
-    # val_data_raw=val_data_raw.map(joinCodeTokens)
 
     # [GENERATE TRAIN AND VALIDATION LOADER]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    train_loader = generateDataLoader("code_search_net", "python", f"train[:{train_split_size}%]", tokenizer,
-                                      batch_size=batch_size, shuffle=True, augment=True)
-    val_loader = generateDataLoader("code_search_net", "python", f"validation[:{validation_split_size}%]", tokenizer,
-                                    batch_size=validation_batch_size, shuffle=False,
-                                    augment=False)  # we don't want to augment the validation set
-
-    ## [TOKENIZE DATA]
-    # tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # train_docs_tokens = tokenizer(train_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
-    # train_code_tokens = tokenizer(train_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
-    # val_docs_tokens = tokenizer(val_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
-    # val_code_tokens = tokenizer(val_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
-    ## [CREATE DATASET OBJECTS]
-    # train_dataset = CodeSearchNetDataset(train_docs_tokens, train_code_tokens)
-    # val_dataset = CodeSearchNetDataset(val_docs_tokens, val_code_tokens)
-    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    ## this expects an entry in the dict that is called "label"
-    # val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=validation_batch_size, shuffle=False)
+    train_loader = generateDataLoader("code_search_net", "python", f"train[:{train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
+    # we don't want to augment the validation set
+    val_loader = generateDataLoader("code_search_net", "python", f"validation[:{validation_split_size}%]", tokenizer, batch_size=validation_batch_size, shuffle=False, augment=False)
 
     # [GENERATE MODEL]
     model = MoCoModel(queue_size, momentum_update_weight).to(device)
@@ -352,14 +261,10 @@ def execute():
                 logits = None
                 if neg_mlp_emb.shape[0] != 0:
                     # compute similarity of negaitve NL/PL pairs and concatenate with l_pos to get logits
-                    l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)),
-                                         torch.transpose(neg_mlp_emb, 0, 1))
+                    l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), torch.transpose(neg_mlp_emb, 0, 1))
                     logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
                 else:
                     logits = l_pos.view((current_batch_size, 1))
-
-                # torch.zeros((current_batch_size, 1), dtype=torch.LongTensor).to(device) #this function has only very limited
-                # function signature overloads, and just converting to torch.LongTensor throws an error somehow...
 
                 # labels: l_pos should always contain the smallest values
                 labels = torch.tensor([0 for h in range(current_batch_size)]).to(device)  # ugly but does the job
@@ -414,19 +319,17 @@ def execute():
                 docs_embeddings, code_embeddings = model(doc_samples, code_samples,
                                                          isInference=True)  # set to false for experimentation purposes
                 # docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
-                # normalize to ensure correct cosine similarity
-                docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
-                code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
                 # docs_mlp_embeddings=F.normalize(docs_mlp_embeddings, p=2, dim=1)
                 # code_mlp_embeddings=F.normalize(code_mlp_embeddings, p=2, dim=1)
 
+                # normalize to ensure correct cosine similarity
+                docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
+                code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
+
+
             # we need to find the best match for each NL sample in the entire validation set, so store everything for now
-            # docs_emb_list.append(docs_embeddings)
-            # code_emb_list.append(code_emb_list)
             docs_emb_list = torch.cat((docs_emb_list, docs_embeddings), dim=0)
             code_emb_list = torch.cat((code_emb_list, code_embeddings), dim=0)
-            # docs_emb_list = torch.cat((docs_emb_list, docs_mlp_embeddings), dim=0)
-            # code_emb_list=torch.cat((code_emb_list, code_mlp_embeddings), dim=0)
 
         # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
@@ -505,7 +408,6 @@ if __name__ == "__main__":
     if args.validation_split_size != None:
         validation_split_size = args.validation_split_size
 
-    print(
-        f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}")
 
     execute()
