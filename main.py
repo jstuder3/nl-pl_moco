@@ -238,10 +238,10 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
     if augment:
         for i in range(len(preprocessed_data)):
             if i%50==0:
-                sys.stdout.write(f"\rAugmentation process: {i}/{}len(preprocessed_data)}")
+                sys.stdout.write(f"\rAugmentation process: {i}/{len(preprocessed_data)}")
                 sys.stdout.flush()
             # augmentation for NL
-            docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1)
+            docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
             preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
             #if augmentation_list[0]!=augmentation_list[1]:
             #    print(f"Original:  {augmentation_list[1]}\nAugmented: {augmentation_list[0]}")
