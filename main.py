@@ -26,13 +26,13 @@ model_name = "microsoft/codebert-base"
 train_split_size = 1
 validation_split_size = 1
 
-validation_batch_size = 16
+validation_batch_size = 32
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 output_delay_time = 50
 
-DEBUG_data_skip_interval = 1  # used to skip data during training to get to validation loop faster
+DEBUG_data_skip_interval = 1 # used to skip data during training to get to validation loop faster
 
 # used for tensorboard logging
 writer = SummaryWriter()
@@ -220,6 +220,10 @@ def execute():
     queueHasNeverBeenFull = True
     for epoch in range(num_epochs):
         print(f"Starting training of epoch {epoch}...")
+        if epoch!=0:
+            # generate a newly augmented dataset
+            train_loader=generateDataLoader("code_search_net", "python", f"train[:{train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
+            print(f"Successfully augmented dataset during epoch {epoch}")
         model.train()
         epoch_time = time.time()
         for i, batch in enumerate(train_loader):
@@ -361,7 +365,7 @@ def execute():
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
         print(f"Validation MRR: {mrr:.4f}")
-        writer.add_scalar("MRR/validation", mrr, epoch)
+        writer.add_scalar("Accuracy/validation/MRR", mrr, epoch)
 
         # [COMPUTE TOP5 AND TOP10 ACCURACY]
         # we can reuse the computation for the MRR
@@ -411,3 +415,5 @@ if __name__ == "__main__":
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}")
 
     execute()
+
+    writer.close()
