@@ -9,6 +9,7 @@ from transformers import AutoModel, AutoTokenizer
 from datasets import load_dataset
 import time
 import argparse
+import random
 
 # [HYPERPARAMETERS] (default values, can get overwritten by named call arguments)
 num_epochs = 10
@@ -30,6 +31,19 @@ device="cuda" if torch.cuda.is_available() else "cpu"
 output_delay_time=50
 
 DEBUG_data_skip_interval=100 # used to skip data during training to get to validation loop faster
+
+# augmentation parameters
+alpha = 0.1 # augmentation parameter used for synonym replacement, random insertion, random swap and random deletion
+
+# download data used for augmentation from the Natural Language Toolkit
+import nltk
+nltk.download("stopwords")
+nltk.download("wordnet")
+nltk.download("punkt")
+nltk.download("wordnet")
+
+# used to remove punctuation
+alphanumeric_extractor = nltk.tokenize.RegExpTokenizer(r"\w+")
 
 # used for tensorboard logging
 writer = SummaryWriter()
@@ -154,6 +168,44 @@ def joinCodeTokens(dict):
     dict["func_code_string_cleaned"]=concatenated_tokens
     return dict
 
+# randomly replaces non-stopwords in the documentation string with their synonyms
+# REMEMBER TO INSTALL THE NATURAL LANGUAGE TOOLKIT USING "pip install -U nltk"
+def synonymReplacement(dict):
+
+    # TODO: test this function!
+
+    no_punctuation_list = alphanumeric_extractor.tokenize(dict["func_documentation_string_shortened"])
+    no_stop_words_list = [word for word in no_punctuation_list if not word in nltk.corpus.stopwords.words()]
+
+    length = len(no_stop_words_list)
+    number_of_words_to_replace=alpha*length # see Easy Data Augmentation paper
+    replacement_targets=random.sample(range(0, length), number_of_words_to_replace)
+
+    #then do the replacement magic on the selected words and put them back into the dict, then return the dict
+    for i in replacement_targets:
+        synonym = random.choice(nltk.corpus.wordnet.synsets(no_stop_words_list[i])) #finds synonyms and takes a random one
+        synonym=synonym.lemmas()[0].name() #extracts the actual word from the Synonym object
+        dict["func_documentation_string_shortened"] = dict["func_documentation_string_shortened"].replace(no_stop_words_list[i], synonym, 1) #replace only one appearance
+
+    return dict
+
+# takes in a set of preprocessed (shortened) data, then augments it if augment is set to true, tokenizes it using
+# the provided tokenizer and turns it into a CodeSearchNetDataset object and finally puts it into
+# a DataLoader object which is returned
+def generateDataLoader(preprocessed_data, tokenizer, augment=False):
+    # we may want to augment several times independently and the copying ensures that
+    # we don't manipulate the original data
+    preprocessed_data=preprocessed_data.copy()
+    if augment:
+        #TODO: Augment data
+        preprocessed_data=preprocessed_data.map(synonymReplacement)
+        x=1
+    docs_tokens = tokenizer(preprocessed_data["func_documentation_string_shortened"], truncation=True, padding="max_length")
+    code_tokens = tokenizer(preprocessed_data["func_code_string_cleaned"], truncation=True, padding="max_length")
+    generated_dataset=CodeSearchNetDataset(docs_tokens, code_tokens)
+    generated_loader=torch.utils.data.DataLoader(generated_dataset, batch_size=batch_size, shuffle=True)
+
+
 def execute():
 
     # [LOAD DATA]
@@ -174,24 +226,25 @@ def execute():
     val_data_raw=val_data_raw.map(shorten_data)
     val_data_raw=val_data_raw.map(joinCodeTokens)
 
-    # [TOKENIZE DATA]
+
+    # [GENERATE TRAIN AND VALIDATION LOADER]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    train_docs_tokens = tokenizer(train_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
-    train_code_tokens = tokenizer(train_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
+    train_loader=generateDataLoader(train_data_raw, tokenizer, augment=True)
+    val_loader=generateDataLoader(val_data_raw, tokenizer, augment=False) #we don't want to augment the validation set
 
-    val_docs_tokens = tokenizer(val_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
-    val_code_tokens = tokenizer(val_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
-
-    # [CREATE DATASET OBJECTS]
-
-    train_dataset = CodeSearchNetDataset(train_docs_tokens, train_code_tokens)
-
-    val_dataset = CodeSearchNetDataset(val_docs_tokens, val_code_tokens)
-
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    # this expects an entry in the dict that is called "label"
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=validation_batch_size, shuffle=False)
+    ## [TOKENIZE DATA]
+    # tokenizer = AutoTokenizer.from_pretrained(model_name)
+    #train_docs_tokens = tokenizer(train_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
+    #train_code_tokens = tokenizer(train_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
+    #val_docs_tokens = tokenizer(val_data_raw["func_documentation_string_shortened"], truncation=True, padding="max_length")
+    #val_code_tokens = tokenizer(val_data_raw["func_code_string_cleaned"], truncation=True, padding="max_length")
+    ## [CREATE DATASET OBJECTS]
+    #train_dataset = CodeSearchNetDataset(train_docs_tokens, train_code_tokens)
+    #val_dataset = CodeSearchNetDataset(val_docs_tokens, val_code_tokens)
+    #train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    ## this expects an entry in the dict that is called "label"
+    #val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=validation_batch_size, shuffle=False)
 
     # [GENERATE MODEL]
     model = MoCoModel(queue_size, momentum_update_weight).to(device)
