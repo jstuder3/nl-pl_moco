@@ -10,6 +10,7 @@ from datasets import load_dataset
 import time
 import argparse
 import sys
+import re
 
 import eda.eda as eda # Easy Data Augmentation
 
@@ -179,8 +180,10 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
                 sys.stdout.write(f"\rAugmentation process: {i}/{len(preprocessed_data)}")
                 sys.stdout.flush()
             # augmentation for NL
-            docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
-            preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
+            
+            if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
+                docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
+                preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
             #if docs_augmentation_list[0]!=augmentation_list[1]:
             #    print(f"Original:  {docs_augmentation_list[1]}\nAugmented: {docs_augmentation_list[0]}")
 
