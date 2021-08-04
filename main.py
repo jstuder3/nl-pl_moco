@@ -195,7 +195,7 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
             #    print(f"Original:  {code_augmentation_list[1]}\nAugmented: {code_augmentation_list[0]}")
         
         # print once more to ensure next output starts on new line
-        sys.stdout.write(f"\rAugmentation process: completed (augmented {len(preprocessed_data) samples)\n")
+        sys.stdout.write(f"\rAugmentation process: completed (augmented {len(preprocessed_data) samples) \n")
         sys.stdout.flush()
     docs_tokens = tokenizer(preprocessed_data["func_documentation_string_shortened"], truncation=True, padding="max_length")
     code_tokens = tokenizer(preprocessed_data["func_code_string_cleaned"], truncation=True, padding="max_length")
