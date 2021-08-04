@@ -180,7 +180,8 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
                 sys.stdout.write(f"\rAugmentation process: {i}/{len(preprocessed_data)}")
                 sys.stdout.flush()
             # augmentation for NL 
-            if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
+            #if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
+            if(len(eda.get_only_chars(preprocessed_data[i]["func_documentation_string_shortened"]))>0):
                 docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
                 preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
             #if docs_augmentation_list[0]!=augmentation_list[1]:
@@ -195,7 +196,7 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
             #    print(f"Original:  {code_augmentation_list[1]}\nAugmented: {code_augmentation_list[0]}")
         
         # print once more to ensure next output starts on new line
-        sys.stdout.write(f"\rAugmentation process: completed (augmented {len(preprocessed_data) samples) \n")
+        sys.stdout.write(f"\rAugmentation process: completed (augmented {len(preprocessed_data)} samples)\n")
         sys.stdout.flush()
     docs_tokens = tokenizer(preprocessed_data["func_documentation_string_shortened"], truncation=True, padding="max_length")
     code_tokens = tokenizer(preprocessed_data["func_code_string_cleaned"], truncation=True, padding="max_length")
@@ -397,6 +398,7 @@ if __name__ == "__main__":
     parser.add_argument("--momentum_update_weight", type=float)
     parser.add_argument("--train_split_size", type=int)
     parser.add_argument("--validation_split_size", type=int)
+    parser.add_argument("--data_skip_interval", type=int)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Received as input parameters: {vars(args)}")
@@ -417,8 +419,10 @@ if __name__ == "__main__":
         train_split_size = args.train_split_size
     if args.validation_split_size != None:
         validation_split_size = args.validation_split_size
+    if args.data_skip_interval != None:
+        DEBUG_data_skip_interval=args.data_skip_interval
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}; DEBUG_data_skip_interval={DEBUG_data_skip_interval};")
 
     execute()
 
