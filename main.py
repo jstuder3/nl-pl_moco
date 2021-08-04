@@ -179,8 +179,7 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
             if i%50==0:
                 sys.stdout.write(f"\rAugmentation process: {i}/{len(preprocessed_data)}")
                 sys.stdout.flush()
-            # augmentation for NL
-            
+            # augmentation for NL 
             if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
                 docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
                 preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
@@ -194,6 +193,10 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
             # preprocessed_data[i]["func_code_string_cleaned"]=code_augmentation_list[0]
             # if code_augmentation_list[0]!=code_augmentation_list[1]:
             #    print(f"Original:  {code_augmentation_list[1]}\nAugmented: {code_augmentation_list[0]}")
+        
+        # print once more to ensure next output starts on new line
+        sys.stdout.write(f"\rAugmentation process: completed (augmented {len(preprocessed_data) samples)\n")
+        sys.stdout.flush()
     docs_tokens = tokenizer(preprocessed_data["func_documentation_string_shortened"], truncation=True, padding="max_length")
     code_tokens = tokenizer(preprocessed_data["func_code_string_cleaned"], truncation=True, padding="max_length")
     generated_dataset = CodeSearchNetDataset(docs_tokens, code_tokens)
