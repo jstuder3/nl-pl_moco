@@ -151,12 +151,13 @@ def shorten_data(dict):
     dict["func_documentation_string_shortened"] = shortened_doc
     return dict
 
-# takes as input a dict that has a key "func_code_tokens", concatenates all the tokens and puts them into the key "func_code_tokens_concatenated"
-# a bit simpler than filtering "func_code_string" but might cause issues later because the output really isn't "perfect"
-# in the sense that it contains many unnecessary whitespaces
+# takes as input a dict that has a key "whole_func_string", filters it for comments and shortens it a bit
+# and returns the dict with an added key that contains the processed "whole_func_string"
 def joinCodeTokens(dict):
-    concatenated_tokens = " ".join(dict["func_code_tokens"])
-    dict["func_code_string_cleaned"] = concatenated_tokens
+    code_docs_removed=re.sub("\"\"\"(.|\n|\r\n)+\"\"\"", "", dict["whole_func_string"], count=1) #remove docstrings, make sure to not waste time by only removing first occurence
+    replace_multi_linebreaks=re.sub("\n\n+", "\n", code_docs_removed) #remove multi-linebreaks to save space
+    replace_multi_spaces_with_tab=re.sub(" {4}", "\t", replace_multi_linebreaks) #replace every set of 4 multi-spaces with a tab
+    dict["func_code_string_cleaned"]=replace_multi_spaces_with_tab
     return dict
 
 def loadAndPreprocessData(source, language, split):
