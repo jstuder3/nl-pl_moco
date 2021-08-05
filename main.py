@@ -24,7 +24,7 @@ momentum_update_weight = 0.999  # see MoCoV1
 model_name = "microsoft/codebert-base"
 
 # limit how much of the total data we use
-train_split_size = 1
+train_split_size = 2
 validation_split_size = 1
 
 validation_batch_size = 32
@@ -154,10 +154,13 @@ def shorten_data(dict):
 # takes as input a dict that has a key "whole_func_string", filters it for comments and shortens it a bit
 # and returns the dict with an added key that contains the processed "whole_func_string"
 def joinCodeTokens(dict):
-    code_docs_removed=re.sub("\"\"\"(.|\n|\r\n)+\"\"\"", "", dict["whole_func_string"], count=1) #remove docstrings, make sure to not waste time by only removing first occurence
-    replace_multi_linebreaks=re.sub("\n\n+", "\n", code_docs_removed) #remove multi-linebreaks to save space
-    replace_multi_spaces_with_tab=re.sub(" {4}", "\t", replace_multi_linebreaks) #replace every set of 4 multi-spaces with a tab
-    dict["func_code_string_cleaned"]=replace_multi_spaces_with_tab
+    #print(len(dict["whole_func_string"]))
+    dict["whole_func_string"]=dict["whole_func_string"][:2000] # small optimization
+    func_string_cache=re.sub("\"\"\"(.|\n|\r\n)+\"\"\"", "",  dict["whole_func_string"], count=1) #remove docstrings, make sure to not waste time by only removing first occurence
+    func_string_cache=re.sub("\n\n+", "\n", func_string_cache) #remove multi-linebreaks to save space
+    func_string_cache=re.sub(" {4}", "\t", func_string_cache) #replace every set of 4 multi-spaces with a tab
+    dict["func_code_string_cleaned"]=func_string_cache
+    #print(len(dict["func_code_string_cleaned"]))
     return dict
 
 def loadAndPreprocessData(source, language, split):
@@ -230,7 +233,7 @@ def execute():
         print(f"Starting training of epoch {epoch}...")
         if epoch!=0:
             # generate a newly augmented dataset
-            train_loader=generateDataLoader("code_search_net", "python", f"train[:{train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
+            train_loader=generateDataLoader("code_search_net", "python", f"train[:{train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=False, augment=True)
             print(f"Successfully augmented dataset during epoch {epoch}")
         model.train()
         epoch_time = time.time()
