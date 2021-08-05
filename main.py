@@ -16,7 +16,7 @@ import eda.eda as eda # Easy Data Augmentation
 
 # [HYPERPARAMETERS] (default values, can get overwritten by named call arguments)
 num_epochs = 10
-batch_size = 2  # see CodeBERT paper
+batch_size = 8  # see CodeBERT paper
 learning_rate = 1e-5  # see CodeBERT paper
 temperature = 0.07  # see MoCoV1
 queue_size = 32  # limits the number of negative sample batches in the queue
@@ -24,8 +24,8 @@ momentum_update_weight = 0.999  # see MoCoV1
 model_name = "microsoft/codebert-base"
 
 # limit how much of the total data we use
-train_split_size = 2
-validation_split_size = 5
+train_split_size = 10
+validation_split_size = 20
 
 validation_batch_size = 32
 
@@ -213,9 +213,12 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
                 sys.stdout.flush()
             # augmentation for NL 
             #if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
-            if(len(eda.get_only_chars(preprocessed_data[i]["func_documentation_string_shortened"]))>0):
-                docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
-                preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
+            try: #can throw errors in some very rare cases that I was not able to debug because it only occured on the server
+                if(len(eda.get_only_chars(preprocessed_data[i]["func_documentation_string_shortened"]))>0):
+                    docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"], num_aug=1) # use default alphas for now
+                    preprocessed_data[i]["func_documentation_string_shortened"]=docs_augmentation_list[0]
+            except:
+                print("Encountered error during augmentation. Sentence: "+str(preprocessed_data[i]["func_documentation_string_shortened"]))
             #if docs_augmentation_list[0]!=augmentation_list[1]:
             #    print(f"Original:  {docs_augmentation_list[1]}\nAugmented: {docs_augmentation_list[0]}")
 
