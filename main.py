@@ -39,7 +39,9 @@ DEBUG_data_skip_interval = 1 # used to skip data during training to get to valid
 # turning this to True will cause us to completely pre-process the code ourselves. this isn't particularly expensive,
 # but during tests it seemed that doing it ourselves hurts training performance
 useCustomCodePreprocessing=False
-useImprovedCodeConcatenation=True # removes some unnecessary whitespaces from the concatenated tokens
+useImprovedCodeConcatenation=False # removes some unnecessary whitespaces from the concatenated tokens
+
+# note : activating either of the two options above seems to hurt performance. maybe CodeBERT was pretrained using the primitive code preprocessing version?
 
 # used for tensorboard logging
 writer = SummaryWriter()
