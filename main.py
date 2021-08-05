@@ -25,7 +25,7 @@ model_name = "microsoft/codebert-base"
 
 # limit how much of the total data we use
 train_split_size = 2
-validation_split_size = 1
+validation_split_size = 5
 
 validation_batch_size = 32
 
@@ -68,20 +68,15 @@ class MoCoModel(nn.Module):
 
     def forward(self, encoder_input, momentum_encoder_input, isInference=False):
         # note entirely sure but I think I may only need the "pooler_output" [bs, 768] and not the "last_hidden_state" [bs, 512, 768]
-        encoder_output = \
-        self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])[
-            "pooler_output"]
+        encoder_output = self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])["pooler_output"]
 
-        # we save some memory by immediately detaching the momentum encoder output. (actually, we could just use "with torch.no_grad:")
-        # we don't need the computation graph of that because we won't backprop through the momentum encoder
-        if isInference:  # use the encoder
-            momentum_encoder_output = self.encoder(input_ids=momentum_encoder_input["input_ids"],
-                                                   attention_mask=momentum_encoder_input["attention_mask"])[
-                "pooler_output"].detach()
-        else:  # use the momentum encoder
-            momentum_encoder_output = self.momentum_encoder(input_ids=momentum_encoder_input["input_ids"],
-                                                            attention_mask=momentum_encoder_input["attention_mask"])[
-                "pooler_output"].detach()
+        # we save some memory by not computing gradients
+        # we don't need the computation graph of the code because we won't backprop through the momentum encoder
+        with torch.no_grad():
+            if isInference:  # use the encoder
+                    momentum_encoder_output = self.encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"]
+            else:  # use the momentum encoder
+                momentum_encoder_output = self.momentum_encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"]
 
         return encoder_output, momentum_encoder_output
 
@@ -149,11 +144,9 @@ class CodeSearchNetDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.doc_tokens["input_ids"])
 
-
 # takes as input a dict that has a key "func_documentation_string", shortens that to the first paragraph and puts the result under the key "func_documentation_string_shortened"
 def shorten_data(dict):
-    shortened_doc = " ".join(dict["func_documentation_string"].partition("\n\n")[
-                                 0].split())  # shortens to the first paragraph and removes all "\n" and multi-whitespaces from the remainders
+    shortened_doc = " ".join(dict["func_documentation_string"].partition("\n\n")[0].split())  # shortens to the first paragraph and removes all "\n" and multi-whitespaces from the remainders
     dict["func_documentation_string_shortened"] = shortened_doc
     return dict
 
@@ -166,13 +159,11 @@ def joinCodeTokens(dict):
         func_string_cache=re.sub(" {4}", "\t", func_string_cache) #replace every set of 4 multi-spaces with a tab
         dict["func_code_string_cleaned"]=func_string_cache
     else:
-        if useImprovedCodeConcatenation:  # shorten the string a bit by removing unnecessary whitespaces
+        if useImprovedCodeConcatenation:  # shorten the string a bit by removing unnecessary whitespaces # MAY ALSO HURT PERFORMANCE!
             for index in range(len(dict["func_code_tokens"])): #add line break after comments
                 if len(dict["func_code_tokens"][index])>0 and dict["func_code_tokens"][index][0]=="#":
                     dict["func_code_tokens"][index]+="\n"
             concatenated_tokens = " ".join(dict["func_code_tokens"])
-            #search_list=[" ( ", " ) "," [ ", " ] ", " : ", " = ", " == ", " != ", " <= "," >= "," < ", " > ", " , ", " . ", " )", " ]", " :"]
-            #replacement_list=["(", ") ", "[", "] ",": ", "=", "==", "!=", "<=", ">=", "<", ">", ", ", ".", ")", "]", ":"]
             pattern_and_target=[[" ( ", "("],
                                 [" ) ", ") "],
                                 [" [ ", "["],
@@ -192,7 +183,7 @@ def joinCodeTokens(dict):
                                 [" :", ":"]]
             for pattern in pattern_and_target:
                 concatenated_tokens=concatenated_tokens.replace(pattern[0], pattern[1])
-        else:
+        else: # SIMPLEST VERSION THAT SEEMS TO PROVIDE THE BEST PERFORMANCE
             concatenated_tokens = " ".join(dict["func_code_tokens"])
         dict["func_code_string_cleaned"] = concatenated_tokens
 
@@ -350,8 +341,7 @@ def execute():
         code_emb_list = torch.tensor([]).to(device)
         val_start_time = time.time()
         consoleOutputTime = time.time()
-        print(
-            f"Starting evaluation after epoch {epoch}, after having seen {epoch * len(train_loader) * batch_size + (i + 1) * batch_size} samples (or {epoch * len(train_loader) + (i + 1)} iterations at batch size {batch_size})...")
+        print(f"Starting evaluation after epoch {epoch}, after having seen {epoch * len(train_loader) * batch_size + (i + 1) * batch_size} samples (or {epoch * len(train_loader) + (i + 1)} iterations at batch size {batch_size})...")
         for i, batch in enumerate(val_loader):
             if time.time() - consoleOutputTime > output_delay_time:
                 print(
@@ -366,8 +356,7 @@ def execute():
 
             # [FORWARD PASS]
             with torch.no_grad():
-                docs_embeddings, code_embeddings = model(doc_samples, code_samples,
-                                                         isInference=True)  # set to false for experimentation purposes
+                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=True)  # set to false for experimentation purposes
                 # docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
                 # docs_mlp_embeddings=F.normalize(docs_mlp_embeddings, p=2, dim=1)
                 # code_mlp_embeddings=F.normalize(code_mlp_embeddings, p=2, dim=1)
@@ -387,7 +376,7 @@ def execute():
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
 
         # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
-        logits = torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1))
+        logits = torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1)) # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
 
         selection = torch.argmax(logits, dim=1)
 
@@ -425,6 +414,36 @@ def execute():
         writer.add_scalar("Accuracy/validation/top_5", top_5_accuracy * 100, epoch)
         writer.add_scalar("Accuracy/validation/top_10", top_10_accuracy * 100, epoch)
 
+        # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
+        avg_pos_cos_similarity = torch.mean(diagonal_values)
+        print(f"Validation avg_pos_cos_similarity: {avg_pos_cos_similarity:.6f}")
+        writer.add_scalar("Similarity/cosine/positive", avg_pos_cos_similarity, epoch)
+
+        # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
+        avg_neg_cos_similarity=torch.mean((torch.sum(logits, dim=1)-diagonal_values)/(docs_emb_list.shape[0]-1))
+        print(f"Validation avg_neg_cos_similarity: {avg_neg_cos_similarity:.6f}")
+        writer.add_scalar("Similarity/cosine/negative", avg_neg_cos_similarity, epoch)
+
+        # free (potentially) a lot of memory
+        del diagonal_values
+        del logits
+
+        # [COMPUTE AVERAGE POSITIVE/NEGATIVE L2 DISTANCE]
+        l2_distance_matrix=torch.cdist(docs_emb_list, code_emb_list, p=2) # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
+        diagonal_l2_distances=torch.diagonal(l2_distance_matrix)
+
+        avg_pos_l2_distance=torch.mean(diagonal_l2_distances)
+        print(f"Validation avg_pos_l2_distance: {avg_pos_l2_distance:.6f}")
+        writer.add_scalar("Similarity/l2/positive", avg_pos_l2_distance, epoch)
+
+        # like for cosine similarity, compute average of negative similarities
+        avg_neg_l2_distance=torch.mean((torch.sum(l2_distance_matrix, dim=1)-diagonal_l2_distances)/(docs_emb_list.shape[0]-1))
+        print(f"Validation avg_neg_l2_distance: {avg_neg_l2_distance:.6f}")
+        writer.add_scalar("Similarity/l2/negative", avg_neg_l2_distance, epoch)
+
+        # for good measure
+        del diagonal_l2_distances
+        del l2_distance_matrix
 
 if __name__ == "__main__":
     # [PARSE ARGUMENTS] (if they are given, otherwise keep default value)
@@ -438,6 +457,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_split_size", type=int)
     parser.add_argument("--validation_split_size", type=int)
     parser.add_argument("--data_skip_interval", type=int)
+    parser.add_argument("--output_interval", type=int)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Received as input parameters: {vars(args)}")
@@ -460,6 +480,8 @@ if __name__ == "__main__":
         validation_split_size = args.validation_split_size
     if args.data_skip_interval != None:
         DEBUG_data_skip_interval=args.data_skip_interval
+    if args.output_interval != None:
+        output_delay_time=args.output_interval
 
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={num_epochs}; batch_size={batch_size}; learning_rate={learning_rate}; temperature={temperature}; queue_size={queue_size}; momentum_update_weight={momentum_update_weight}; train_split_size={train_split_size}; validation_split_size={validation_split_size}; DEBUG_data_skip_interval={DEBUG_data_skip_interval};")
 
