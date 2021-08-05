@@ -35,6 +35,12 @@ output_delay_time = 50
 
 DEBUG_data_skip_interval = 1 # used to skip data during training to get to validation loop faster
 
+# if this is false, we simply concatenate the pre-filtered code tokens with a space in between each token
+# turning this to True will cause us to completely pre-process the code ourselves. this isn't particularly expensive,
+# but during tests it seemed that doing it ourselves hurts training performance
+useCustomCodePreprocessing=False
+useImprovedCodeConcatenation=True # removes some unnecessary whitespaces from the concatenated tokens
+
 # used for tensorboard logging
 writer = SummaryWriter()
 
@@ -154,11 +160,42 @@ def shorten_data(dict):
 # takes as input a dict that has a key "whole_func_string", filters it for comments and shortens it a bit
 # and returns the dict with an added key that contains the processed "whole_func_string"
 def joinCodeTokens(dict):
-    func_string_cache=re.sub("((\n+)|(\r\n)+)", "\n", dict["whole_func_string"]) # turn all windows line terminators into unix line terminators (absolutely necessary because those sometimes cause non-termination for the next line somehow)
-    func_string_cache=re.sub("\"\"\"(.|\n)+\"\"\"", "",  func_string_cache, count=1) #remove docstrings, make sure to not waste time by only removing first occurence
-    #func_string_cache=re.sub("(\n\n+)|(\r\n(\r\n)+)", "\n", func_string_cache) #remove multi-linebreaks to save space (already done on the first line)
-    func_string_cache=re.sub(" {4}", "\t", func_string_cache) #replace every set of 4 multi-spaces with a tab
-    dict["func_code_string_cleaned"]=func_string_cache
+    if useCustomCodePreprocessing: # MAY HURT PERFORMANCE!
+        func_string_cache=re.sub("((\n+)|(\r\n)+)", "\n", dict["whole_func_string"]) # turn all windows-like line terminators into unix-like line terminators (absolutely necessary because those sometimes cause non-termination for the next line somehow), also remove multi-linebreaks
+        func_string_cache=re.sub("\"\"\"(.|\n)+\"\"\"", "",  func_string_cache, count=1) #remove docstrings, make sure to not waste time by only removing first occurence
+        func_string_cache=re.sub(" {4}", "\t", func_string_cache) #replace every set of 4 multi-spaces with a tab
+        dict["func_code_string_cleaned"]=func_string_cache
+    else:
+        if useImprovedCodeConcatenation:  # shorten the string a bit by removing unnecessary whitespaces
+            for index in range(len(dict["func_code_tokens"])): #add line break after comments
+                if len(dict["func_code_tokens"][index])>0 and dict["func_code_tokens"][index][0]=="#":
+                    dict["func_code_tokens"][index]+="\n"
+            concatenated_tokens = " ".join(dict["func_code_tokens"])
+            #search_list=[" ( ", " ) "," [ ", " ] ", " : ", " = ", " == ", " != ", " <= "," >= "," < ", " > ", " , ", " . ", " )", " ]", " :"]
+            #replacement_list=["(", ") ", "[", "] ",": ", "=", "==", "!=", "<=", ">=", "<", ">", ", ", ".", ")", "]", ":"]
+            pattern_and_target=[[" ( ", "("],
+                                [" ) ", ") "],
+                                [" [ ", "["],
+                                [" ] ", "] "],
+                                [" : ", ": "],
+                                [" = ", "="],
+                                [" == ", "=="],
+                                [" != ", "!="],
+                                [" <= ", "<="],
+                                [" >= ", ">="],
+                                [" < ", "<"],
+                                [" > ", ">"],
+                                [" , ", ", "],
+                                [" . ", "."],
+                                [" )", ")"],
+                                [" ]", "]"],
+                                [" :", ":"]]
+            for pattern in pattern_and_target:
+                concatenated_tokens=concatenated_tokens.replace(pattern[0], pattern[1])
+        else:
+            concatenated_tokens = " ".join(dict["func_code_tokens"])
+        dict["func_code_string_cleaned"] = concatenated_tokens
+
     return dict
 
 def loadAndPreprocessData(source, language, split):
