@@ -154,16 +154,11 @@ def shorten_data(dict):
 # takes as input a dict that has a key "whole_func_string", filters it for comments and shortens it a bit
 # and returns the dict with an added key that contains the processed "whole_func_string"
 def joinCodeTokens(dict):
-    concatenated_tokens = " ".join(dict["func_code_tokens"])
-    dict["func_code_string_cleaned"] = concatenated_tokens
-    # the following code seems to never terminate for specific cases; need to debug that!
-    #print(len(dict["whole_func_string"]))
-    #dict["whole_func_string"]=dict["whole_func_string"][:2000] # small optimization
-    #func_string_cache=re.sub("\"\"\"(.|\n|\r\n)+\"\"\"", "",  dict["whole_func_string"], count=1) #remove docstrings, make sure to not waste time by only removing first occurence
-    #func_string_cache=re.sub("\n\n+", "\n", func_string_cache) #remove multi-linebreaks to save space
-    #func_string_cache=re.sub(" {4}", "\t", func_string_cache) #replace every set of 4 multi-spaces with a tab
-    #dict["func_code_string_cleaned"]=func_string_cache
-    #print(len(dict["func_code_string_cleaned"]))
+    func_string_cache=re.sub("((\n+)|(\r\n)+)", "\n", dict["whole_func_string"]) # turn all windows line terminators into unix line terminators (absolutely necessary because those sometimes cause non-termination for the next line somehow)
+    func_string_cache=re.sub("\"\"\"(.|\n)+\"\"\"", "",  func_string_cache, count=1) #remove docstrings, make sure to not waste time by only removing first occurence
+    #func_string_cache=re.sub("(\n\n+)|(\r\n(\r\n)+)", "\n", func_string_cache) #remove multi-linebreaks to save space (already done on the first line)
+    func_string_cache=re.sub(" {4}", "\t", func_string_cache) #replace every set of 4 multi-spaces with a tab
+    dict["func_code_string_cleaned"]=func_string_cache
     return dict
 
 def loadAndPreprocessData(source, language, split):
