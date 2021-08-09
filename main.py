@@ -16,7 +16,7 @@ from utils.data_loading import generateDataLoader
 
 # [HYPERPARAMETERS] (default values, can get overwritten by named call arguments)
 num_epochs = 10
-batch_size = 2  # see CodeBERT paper
+batch_size = 8  # see CodeBERT paper
 learning_rate = 1e-5  # see CodeBERT paper
 temperature = 0.07  # see MoCoV1
 queue_size = 32  # limits the number of negative sample batches in the queue
@@ -24,8 +24,8 @@ momentum_update_weight = 0.999  # see MoCoV1
 model_name = "microsoft/codebert-base"
 
 # limit how much of the total data we use
-train_split_size = 2
-validation_split_size = 5
+train_split_size = 10
+validation_split_size = 20
 
 validation_batch_size = 32
 
@@ -121,6 +121,7 @@ class MoCoModel(nn.Module):
 
     def currentQueueSize(self):
         return len(self.queue)
+
 
 def execute():
 
