@@ -3,3 +3,5 @@
 utils/eda/__pycache__/eda.cpython-39.pyc
 runs/
 .idea/
+utils/__pycache__/
+utils/eda/__pycache__/
