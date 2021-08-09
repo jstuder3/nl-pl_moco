@@ -73,10 +73,14 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
                 sys.stdout.flush()
             # augmentation for NL
             # if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
-            if (len(eda.get_only_chars(preprocessed_data[i]["func_documentation_string_shortened"])) > 0):
-                docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"],
-                                                 num_aug=1)  # use default alphas for now
-                preprocessed_data[i]["func_documentation_string_shortened"] = docs_augmentation_list[0]
+            try:  # can throw errors in some very rare cases that I was not able to debug because it only occured on the server
+                if (len(eda.get_only_chars(preprocessed_data[i]["func_documentation_string_shortened"])) > 0):
+                    docs_augmentation_list = eda.eda(preprocessed_data[i]["func_documentation_string_shortened"],
+                                                     num_aug=1)  # use default alphas for now
+                    preprocessed_data[i]["func_documentation_string_shortened"] = docs_augmentation_list[0]
+            except:
+                print("Encountered error during augmentation. Sentence: " + str(
+                    preprocessed_data[i]["func_documentation_string_shortened"]))
             # if docs_augmentation_list[0]!=augmentation_list[1]:
             #    print(f"Original:  {docs_augmentation_list[1]}\nAugmented: {docs_augmentation_list[0]}")
 
