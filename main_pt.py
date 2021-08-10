@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 import pytorch_lightning as pl
 import argparse
+from random import randrange
 
 from utils.data_loading import generateDataLoader
 
@@ -26,7 +27,7 @@ validation_split_size = 5
 
 class MoCoModelPTL(pl.LightningModule):
     def __init__(self, max_queue_size, update_weight, model_name):
-        super(MoCoModelPTL, self).__init__()
+        super().__init__()
         self.automatic_optimization = False # we need that because we have a custom optimization step (with momentum encoder updates)
         # initialize all the parts of MoCoV2
         self.encoder = AutoModel.from_pretrained(model_name)
@@ -46,21 +47,32 @@ class MoCoModelPTL(pl.LightningModule):
             nn.Linear(2048, 128))
 
     def forward(self, encoder_input, momentum_encoder_input, isInference=False):
-        encoder_output = self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])["pooler_output"]
+
+        if not isInference:
+            encoder_output = self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])["pooler_output"]
+        else:
+            with torch.no_grad():
+                encoder_output = self.encoder(input_ids=encoder_input["input_ids"], attention_mask=encoder_input["attention_mask"])["pooler_output"]
 
         # we save some memory by not computing gradients
         # we don't need the computation graph of the code because we won't backprop through the momentum encoder
         with torch.no_grad():
             if isInference:  # use the encoder
-                    momentum_encoder_output = self.encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"]
+                momentum_encoder_output = self.encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"]
             else:  # use the momentum encoder
                 momentum_encoder_output = self.momentum_encoder(input_ids=momentum_encoder_input["input_ids"], attention_mask=momentum_encoder_input["attention_mask"])["pooler_output"]
 
         return encoder_output, momentum_encoder_output
 
     def mlp_forward(self, encoder_mlp_input, positive_momentum_encoder_mlp_input, isInference=False):
-        encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
-        positive_mlp_output = self.momentum_encoder_mlp(positive_momentum_encoder_mlp_input)
+        if not isInference:
+            encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
+            positive_mlp_output = self.momentum_encoder_mlp(positive_momentum_encoder_mlp_input)
+        else:
+            with torch.no_grad():
+                encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
+                positive_mlp_output = self.momentum_encoder_mlp(positive_momentum_encoder_mlp_input)
+
         # only compute the mlp forwards of the queue entries if we're in training
         if not isInference:
             momentum_encoder_mlp_output = torch.tensor([])
@@ -79,9 +91,15 @@ class MoCoModelPTL(pl.LightningModule):
     def update_momentum_encoder(self):
         # update momentum_encoder weights by taking the weighted average of the current weights and the new encoder weights
         # note: need to make sure that this actually works (update: seems to work)
-        encoder_params = self.encoder.state_dict()
-        for name, param in self.momentum_encoder.named_parameters():
-            param = self.update_weight * param + (1 - self.update_weight) * encoder_params[name]
+        # commented out: my versino (probably works, but I don't want to risk anything)
+        #encoder_params = self.encoder.state_dict()
+        #for name, param in self.momentum_encoder.named_parameters():
+        #    param = self.update_weight * param + (1 - self.update_weight) * encoder_params[name]
+
+        # ADAPTED FROM https://github.com/PyTorchLightning/lightning-bolts/blob/master/pl_bolts/models/self_supervised/moco/moco2_module.py ! MAY NEED LICENSE TO USE THIS!
+        for param_q, param_k in zip(self.encoder.parameters(), self.momentum_encoder.parameters()):
+            em = self.update_weight
+            param_k.data = param_k.data * em + param_q.data * (1. - em)
 
     def replaceOldestQueueEntry(self, newEntry):
         # this function will replace the oldest ("most stale") entry of the queue
@@ -194,8 +212,7 @@ class MoCoModelPTL(pl.LightningModule):
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
 
         # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
-        logits = torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0,
-                                                             1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
+        logits = torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
 
         selection = torch.argmax(logits, dim=1)
 
@@ -214,8 +231,7 @@ class MoCoModelPTL(pl.LightningModule):
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
         diagonal_values = torch.diagonal(logits)
         # need to enforce column-wise broadcasting
-        ranks = torch.sum(logits >= torch.transpose(diagonal_values.view(1, -1), 0, 1),
-                          dim=1)  # sum up elements with >= similarity than positive embedding
+        ranks = torch.sum(logits >= torch.transpose(diagonal_values.view(1, -1), 0, 1), dim=1)  # sum up elements with >= similarity than positive embedding
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
         print(f"Validation MRR: {mrr:.4f}")
@@ -268,15 +284,19 @@ class MoCoModelPTL(pl.LightningModule):
 def execute():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     val_loader = generateDataLoader("code_search_net", "python", f"validation[:{validation_split_size}%]", tokenizer, batch_size=validation_batch_size, shuffle=False, augment=False)
+    torch.cuda.manual_seed_all(randrange(100000))  # synch seed for weight initialization over all gpus (to ensure same initialization for MLP)
     model = MoCoModelPTL(max_queue_size=queue_size, update_weight=momentum_update_weight, model_name=model_name)
 
     logger = pl.loggers.TensorBoardLogger("runs", name=f"batch_size_{batch_size}-queue_size_{queue_size}-max_epochs_{num_epochs}-train_split_{train_split_size}-val_split_{validation_split_size}-num_gpus_{num_gpus}")
 
-    for i in range(num_epochs):
+    # IMPORTANT: FOR TESTING ON WINDOWS, USE EITHER DP OR DDP_CPU BECAUSE DDP IS NOT SUPPORTED
+    trainer = pl.Trainer(gpus=num_gpus, max_epochs=1, logger=logger, log_gpu_memory="all", fast_dev_run=True)#,gpus=num_gpus, precision=16, accelerator="dp", plugins="deepspeed")  # maxepochs=1 because we want to augment after every epoch
+    #remove log_gpu_memory and fast_dev_run later because it may slow down training
+
+    for _ in range(num_epochs):
         # generate new augmented dataset
         train_loader = generateDataLoader("code_search_net", "python", f"train[:{train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
         # train for one epoch
-        trainer = pl.Trainer(gpus=num_gpus, max_epochs=1, logger=logger, precision=16, accelerator="ddp", plugins="deepspeed") #maxepochs=1 because we want to augment after every epoch
         trainer.fit(model, train_loader, val_loader)
 
 if __name__ == "__main__":

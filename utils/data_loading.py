@@ -69,7 +69,7 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
     if augment:
         for i in range(len(preprocessed_data)):
             if i % 50 == 0:
-                sys.stdout.write(f"\rAugmentation process: {i}/{len(preprocessed_data)}")
+                sys.stdout.write(f"\rAugmentation process: {i}/{len(preprocessed_data)} ({i/len(preprocessed_data)*100:.1f}%)")
                 sys.stdout.flush()
             # augmentation for NL
             # if (re.search('[a-zA-Z]', preprocessed_data[i]["func_documentation_string_shortened"])): # necessary because there's some docstrings that are exclusively in different languages/non-latin alphabets and that breaks the eda code
@@ -93,7 +93,7 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
             #    print(f"Original:  {code_augmentation_list[1]}\nAugmented: {code_augmentation_list[0]}")
 
         # print once more to ensure next output starts on new line
-        sys.stdout.write(f"\rAugmentation process: completed (augmented {len(preprocessed_data)} samples)\n")
+        sys.stdout.write(f"\rAugmentation process: DONE (augmented {len(preprocessed_data)} samples)\n")
         sys.stdout.flush()
     docs_tokens = tokenizer(preprocessed_data["func_documentation_string_shortened"], truncation=True,
                             padding="max_length")
