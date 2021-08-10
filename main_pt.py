@@ -22,7 +22,7 @@ validation_batch_size=32
 num_gpus=torch.cuda.device_count()
 
 # limit how much of the total data we use
-train_split_size = 2
+train_split_size = 1
 validation_split_size = 5
 
 class MoCoModelPTL(pl.LightningModule):
@@ -85,7 +85,7 @@ class MoCoModelPTL(pl.LightningModule):
             return encoder_mlp_output, positive_mlp_output
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters, lr=learning_rate)  # CodeBERT was pretrained using Adam
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)  # CodeBERT was pretrained using Adam
         return optimizer
 
     def update_momentum_encoder(self):
@@ -151,7 +151,7 @@ class MoCoModelPTL(pl.LightningModule):
             logits = l_pos.view((current_batch_size, 1))
 
         # labels: l_pos should always contain the smallest values
-        labels = torch.tensor([0 for h in range(current_batch_size)])  # ugly but does the job
+        labels = torch.tensor([0 for h in range(current_batch_size)]).cuda() # ugly but does the job, also for some reason PTL doesn't automatically move this to the gpu (keeps it on cpu), so we still need .cuda()
 
         loss = F.cross_entropy(logits / temperature, labels)
 
@@ -290,7 +290,7 @@ def execute():
     logger = pl.loggers.TensorBoardLogger("runs", name=f"batch_size_{batch_size}-queue_size_{queue_size}-max_epochs_{num_epochs}-train_split_{train_split_size}-val_split_{validation_split_size}-num_gpus_{num_gpus}")
 
     # IMPORTANT: FOR TESTING ON WINDOWS, USE EITHER DP OR DDP_CPU BECAUSE DDP IS NOT SUPPORTED
-    trainer = pl.Trainer(gpus=num_gpus, max_epochs=1, logger=logger, log_gpu_memory="all", fast_dev_run=True)#,gpus=num_gpus, precision=16, accelerator="dp", plugins="deepspeed")  # maxepochs=1 because we want to augment after every epoch
+    trainer = pl.Trainer(gpus=num_gpus, max_epochs=1, logger=logger, log_gpu_memory="all", fast_dev_run=True, precision=16, accelerator="dp")#, plugins="deepspeed")  # maxepochs=1 because we want to augment after every epoch
     #remove log_gpu_memory and fast_dev_run later because it may slow down training
 
     for _ in range(num_epochs):
