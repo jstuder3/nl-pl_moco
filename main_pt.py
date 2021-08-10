@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 import pytorch_lightning as pl
 import argparse
-from random import randrange
+import random
 
 from utils.data_loading import generateDataLoader
 
@@ -32,6 +32,9 @@ class MoCoModelPTL(pl.LightningModule):
         # initialize all the parts of MoCoV2
         self.encoder = AutoModel.from_pretrained(model_name)
         self.momentum_encoder = AutoModel.from_pretrained(model_name)
+        for parm in self.momentum_encoder.parameters():
+            param.requires_grad = False
+        
         self.queue = []
         self.current_index = 0
         self.max_queue_size = max_queue_size
@@ -90,7 +93,7 @@ class MoCoModelPTL(pl.LightningModule):
 
     def update_momentum_encoder(self):
         # update momentum_encoder weights by taking the weighted average of the current weights and the new encoder weights
-        # note: need to make sure that this actually works (update: seems to work)
+
         # commented out: my versino (probably works, but I don't want to risk anything)
         #encoder_params = self.encoder.state_dict()
         #for name, param in self.momentum_encoder.named_parameters():
@@ -172,11 +175,7 @@ class MoCoModelPTL(pl.LightningModule):
 
     def training_step_end(self, outputs):
         # TODO: check that this works as intended
-        print(f"Before: {outputs.shape}")
         outputs = self.all_gather(outputs) # does this do what I expect it to do?
-        print(f"After: {outputs.shape}")
-        import IPython
-        IPython.embed()
         # for out in outputs:
         #     self.replaceOldestQueueEntry(out) # alternatively, we could concatenate all outputs into one tensor and append that tensor to the queue
         concatenated_ouptuts = torch.tensor([]).cuda() # wow... still need to push it to the gpu for this to work smh...
@@ -286,15 +285,18 @@ class MoCoModelPTL(pl.LightningModule):
         del l2_distance_matrix
 
 def execute():
+    random.seed(0)
+    torch.cuda.manual_seed_all(0)  # synch seed for weight initialization over all gpus (to ensure same initialization for MLP)
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     val_loader = generateDataLoader("code_search_net", "python", f"validation[:{validation_split_size}%]", tokenizer, batch_size=validation_batch_size, shuffle=False, augment=False)
-    torch.cuda.manual_seed_all(randrange(100000))  # synch seed for weight initialization over all gpus (to ensure same initialization for MLP)
+
     model = MoCoModelPTL(max_queue_size=queue_size, update_weight=momentum_update_weight, model_name=model_name)
 
     logger = pl.loggers.TensorBoardLogger("runs", name=f"batch_size_{batch_size}-queue_size_{queue_size}-max_epochs_{num_epochs}-train_split_{train_split_size}-val_split_{validation_split_size}-num_gpus_{num_gpus}")
 
     # IMPORTANT: FOR TESTING ON WINDOWS, USE EITHER DP OR DDP_CPU BECAUSE DDP IS NOT SUPPORTED
-    trainer = pl.Trainer(gpus=num_gpus, max_epochs=1, logger=logger, log_gpu_memory="all", fast_dev_run=True, precision=16, accelerator="dp")#, plugins="deepspeed")  # maxepochs=1 because we want to augment after every epoch
+    trainer = pl.Trainer(gpus=num_gpus, max_epochs=1, logger=logger, log_gpu_memory="all", precision=16, accelerator="ddp")#, plugins="deepspeed") # maxepochs=1 because we want to augment after every epoch
     #remove log_gpu_memory and fast_dev_run later because it may slow down training
 
     for _ in range(num_epochs):
