@@ -20,8 +20,8 @@ from utils.data_loading import generateDataLoader
 
 import platform
 
-if platform.system() == "Linux":
-    from pl_bolts.utils import _PL_GREATER_EQUAL_1_4  # THIS WILL CRASH ON WINDOWS! MAKE SURE TO NOT USE DDP ON WINDOWS!
+#if platform.system() == "Linux":
+   # from pl_bolts.utils import _PL_GREATER_EQUAL_1_4  # THIS WILL CRASH ON WINDOWS! MAKE SURE TO NOT USE DDP ON WINDOWS!
 
 class Moco_v2(LightningModule):
 
@@ -239,9 +239,10 @@ class Moco_v2(LightningModule):
     @staticmethod
     def _use_ddp_or_ddp2(trainer: Trainer) -> bool:
         # for backwards compatibility
-        if _PL_GREATER_EQUAL_1_4:
-            return trainer.accelerator_connector.use_ddp or trainer.accelerator_connector.use_ddp2
-        return trainer.use_ddp or trainer.use_ddp2
+        #if _PL_GREATER_EQUAL_1_4:
+        #    return trainer.accelerator_connector.use_ddp or trainer.accelerator_connector.use_ddp2
+        #return trainer.use_ddp or trainer.use_ddp2
+        return platform.system()=="Linux"
 
 # utils
 @torch.no_grad()
@@ -278,14 +279,14 @@ def execute():
     logger = pl.loggers.TensorBoardLogger("runs", name=f"batch_size_{batch_size}-queue_size_{args.queue_size}-max_epochs_{args.num_epochs}-train_split_{args.train_split_size}-val_split_{args.val_split_size}-num_gpus_{torch.cuda.device_count()}")
 
     # IMPORTANT: FOR TESTING ON WINDOWS, USE EITHER DP OR DDP_CPU BECAUSE DDP IS NOT SUPPORTED
-    trainer = pl.Trainer(gpus=-1, max_epochs=1, logger=logger, log_gpu_memory="all", precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"))  # , plugins="deepspeed") # maxepochs=1 because we want to augment after every epoch
+    trainer = pl.Trainer(gpus=-1, max_epochs=10, logger=logger, log_gpu_memory="all", precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"))  # , plugins="deepspeed") # maxepochs=1 because we want to augment after every epoch
     # remove log_gpu_memory and fast_dev_run later because it may slow down training
 
-    for _ in range(args.num_epochs):
+    #for _ in range(args.num_epochs):
         # generate new augmented dataset
-        train_loader = generateDataLoader("code_search_net", "python", f"train[:{args.train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
+    train_loader = generateDataLoader("code_search_net", "python", f"train[:{args.train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
         # train for one epoch
-        trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader)
 
 
 if __name__ == '__main__':
