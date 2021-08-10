@@ -179,7 +179,7 @@ class MoCoModelPTL(pl.LightningModule):
         IPython.embed()
         # for out in outputs:
         #     self.replaceOldestQueueEntry(out) # alternatively, we could concatenate all outputs into one tensor and append that tensor to the queue
-        concatenated_ouptuts = torch.tensor([])
+        concatenated_ouptuts = torch.tensor([]).cuda() # wow... still need to push it to the gpu for this to work smh...
         for out in outputs:
             concatenated_ouptuts = torch.cat((concatenated_ouptuts, out), dim=0) #is this correct? in particular, is dim=0 right?
         self.replaceOldestQueueEntry(concatenated_ouptuts)
@@ -204,8 +204,8 @@ class MoCoModelPTL(pl.LightningModule):
 
         outputs = self.all_gather(outputs)
 
-        docs_emb_list = torch.tensor([])
-        code_emb_list = torch.tensor([])
+        docs_emb_list = torch.tensor([]).cuda() # ... ???
+        code_emb_list = torch.tensor([]).cuda()
         for iteration_outs in outputs: # uhm... right? ...
             for out in iteration_outs:
                 docs_embeddings, code_embeddings = out
@@ -222,7 +222,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         # [COMPUTE TOP1 ACCURACY]
         # the correct guess is always on the diagonal of the logits matrix
-        diagonal_label_tensor = torch.tensor([x for x in range(docs_emb_list.shape[0])])
+        diagonal_label_tensor = torch.tensor([x for x in range(docs_emb_list.shape[0])]).cuda()
 
         top_1_correct_guesses = torch.sum(selection == diagonal_label_tensor)
 
