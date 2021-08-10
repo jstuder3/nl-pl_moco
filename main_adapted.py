@@ -29,7 +29,7 @@ class Moco_v2(LightningModule):
         self,
         base_encoder: Union[str, torch.nn.Module] = "microsoft/codebert-base",
         emb_dim: int = 128,
-        num_negatives: int = 2048,
+        num_negatives: int = 32768,
         encoder_momentum: float = 0.999,
         softmax_temperature: float = 0.07,
         learning_rate: float = 1e-5,
@@ -223,7 +223,7 @@ class Moco_v2(LightningModule):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument('--base_encoder', type=str, default="microsoft/codebert-base")
         parser.add_argument('--num_workers', type=int, default=8)
-        parser.add_argument('--queue_size', type=int, default=2048)
+        parser.add_argument('--queue_size', type=int, default=32768)
         parser.add_argument("--num_epochs", type=int, default=10)
         parser.add_argument('--encoder_momentum', type=float, default=0.999)
         parser.add_argument('--softmax_temperature', type=float, default=0.07)
