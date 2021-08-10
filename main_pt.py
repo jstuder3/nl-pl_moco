@@ -172,7 +172,11 @@ class MoCoModelPTL(pl.LightningModule):
 
     def training_step_end(self, outputs):
         # TODO: check that this works as intended
+        print(f"Before: {outputs.shape}")
         outputs = self.all_gather(outputs) # does this do what I expect it to do?
+        print(f"After: {outputs.shape}")
+        import IPython
+        IPython.embed()
         # for out in outputs:
         #     self.replaceOldestQueueEntry(out) # alternatively, we could concatenate all outputs into one tensor and append that tensor to the queue
         concatenated_ouptuts = torch.tensor([])
