@@ -99,5 +99,5 @@ def generateDataLoader(source, language, split, tokenizer, batch_size, shuffle=F
                             padding="max_length")
     code_tokens = tokenizer(preprocessed_data["func_code_string_cleaned"], truncation=True, padding="max_length")
     generated_dataset = CodeSearchNetDataset(docs_tokens, code_tokens)
-    generated_loader = torch.utils.data.DataLoader(generated_dataset, batch_size=batch_size, shuffle=shuffle)
+    generated_loader = torch.utils.data.DataLoader(generated_dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True) #need drop_last=True to ensure correct functionality of queue in PTL implementation
     return generated_loader

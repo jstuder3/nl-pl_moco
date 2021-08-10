@@ -26,19 +26,18 @@ train_split_size = 1
 validation_split_size = 5
 
 class MoCoModelPTL(pl.LightningModule):
-    def __init__(self, max_queue_size, update_weight, model_name):
+    def __init__(self, max_queue_size, update_weight, model_name, batch_size):
         super().__init__()
-        self.automatic_optimization = False # we need that because we have a custom optimization step (with momentum encoder updates)
+        #self.automatic_optimization = False # we need that because we have a custom optimization step (with momentum encoder updates)
         # initialize all the parts of MoCoV2
         self.encoder = AutoModel.from_pretrained(model_name)
         self.momentum_encoder = AutoModel.from_pretrained(model_name)
         for parm in self.momentum_encoder.parameters():
             param.requires_grad = False
         
-        self.queue = []
-        self.current_index = 0
-        self.max_queue_size = max_queue_size
-        self.update_weight = update_weight
+        # self.queue = []
+        # self.current_index = 0
+
         self.encoder_mlp = nn.Sequential(  # should there be a relu here or not?
             nn.Linear(768, 2048),
             nn.ReLU(),
@@ -48,6 +47,18 @@ class MoCoModelPTL(pl.LightningModule):
             nn.Linear(768, 2048),
             nn.ReLU(),
             nn.Linear(2048, 128))
+
+        self.max_queue_size = max_queue_size
+        self.update_weight = update_weight
+        self.batch_size = batch_size
+
+        # initialize queue
+        # ADAPTED FROM https://github.com/PyTorchLightning/lightning-bolts/blob/5ab4faeaa4eca378b24d22e18316a2be4e9745b3/pl_bolts/models/self_supervised/moco/moco2_module.py#L348
+        self.register_buffer("queue", torch.randn(max_queue_size, 768)) # note: this is transposed from the reference implementation
+        self.queue = F.normalize(self.queue, dim=1) # normalize every entry in the queue
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+
 
     def forward(self, encoder_input, momentum_encoder_input, isInference=False):
 
@@ -78,11 +89,13 @@ class MoCoModelPTL(pl.LightningModule):
 
         # only compute the mlp forwards of the queue entries if we're in training
         if not isInference:
-            momentum_encoder_mlp_output = torch.tensor([])
-            # the queue only contains negative samples
-            for index, queue_entry in enumerate(self.queue):
-                mlp_output = self.momentum_encoder_mlp(queue_entry)
-                momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)
+        #    momentum_encoder_mlp_output = torch.tensor([]).cuda()
+        #    # the queue only contains negative samples
+        #    for index, queue_entry in enumerate(self.queue):
+        #        mlp_output = self.momentum_encoder_mlp(queue_entry)
+        #        momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)
+
+
             return encoder_mlp_output, positive_mlp_output, momentum_encoder_mlp_output
         else:  # isInference=True
             return encoder_mlp_output, positive_mlp_output
@@ -104,29 +117,37 @@ class MoCoModelPTL(pl.LightningModule):
             em = self.update_weight
             param_k.data = param_k.data * em + param_q.data * (1. - em)
 
-    def replaceOldestQueueEntry(self, newEntry):
+    # ADAPTED FROM https://github.com/PyTorchLightning/lightning-bolts/blob/5ab4faeaa4eca378b24d22e18316a2be4e9745b3/pl_bolts/models/self_supervised/moco/moco2_module.py#L348
+    def replaceOldestQueueEntry(self, newEntry, queue, queue_ptr):
         # this function will replace the oldest ("most stale") entry of the queue
 
-        queueIsFull = (len(self.queue) >= self.max_queue_size)
-        # if the queue is full, replace the oldest entry
-        if queueIsFull:
-            self.queue[self.current_index] = newEntry.detach()  # we detach to make sure that we don't waste memory
-        # else: queue is not yet full
-        else:
-            self.queue.append(newEntry.detach())
-        self.current_index = (self.current_index + 1) % self.max_queue_size  # potential for off-by-one error
+        keys = concat_all_gather(newEntry)
+        concat_batch_size = keys.shape[0]
 
-        return queueIsFull  # returning this isn't necessary but might be useful
+        assert self.max_queue_size % batch_size == 0 # makes things simpler, but requires drop_last=True on the dataloader to only have full batches
+
+        queue[ptr:ptr+concat_batch_size, :] = keys
+        ptr = (ptr+batch_size) % self.max_queue_size
+
+        queue_ptr[0]=ptr
+
 
     def training_step(self, train_batch, batch_idx):
         doc_samples = {"input_ids": train_batch["doc_input_ids"], "attention_mask": train_batch["doc_attention_mask"]}
         code_samples = {"input_ids": train_batch["code_input_ids"], "attention_mask": train_batch["code_attention_mask"]}
         current_batch_size = doc_samples["input_ids"].shape[0]
 
+        # apply a weighted average update on the momentum encoder ("momentum update")
+        self.update_momentum_encoder()
+
         # [FORWARD PASS]
 
         # compute outputs of pretrained CodeBERT encoder and momentum encoder
         encoder_embeddings, positive_momentum_encoder_embeddings = self.forward(doc_samples, code_samples, isInference=False)
+
+        # THIS IS NEW AND HAS NOT BEEN TESTED IN THE NON-PTL VERSION
+        encoder_embeddings = F.normalize(encoder_embeddings, dim=1)
+        positive_momentum_encoder_embeddings= F.normalize(positive_momentum_encoder_embeddings, dim=1)
 
         # encoder_mlp contains the mlp output of the queries
         # pos_mlp_emb contains the mlp output of the positive keys
@@ -158,30 +179,23 @@ class MoCoModelPTL(pl.LightningModule):
 
         loss = F.cross_entropy(logits / temperature, labels)
 
-        # [BACKPROPAGATION / WEIGHT UPDATES]
-        # note: this is PyTorchLightning-specific; we need manual optimization because we have momentum updates
-        optimizer=self.optimizers()
-        optimizer.zero_grad()
-        self.manual_backward(loss)
-        optimizer.step()
-
-        # apply a weighted average update on the momentum encoder ("momentum update")
-        self.update_momentum_encoder()
-
         # update tensorboard
         self.log("Loss/training", loss.item())
 
-        return positive_momentum_encoder_embeddings
+        self.replaceOldestQueueEntry(newEntry=positive_momentum_encoder_embeddings, queue=self.queue, queue_ptr=self.queue_ptr)
 
-    def training_step_end(self, outputs):
+        return loss
+
+    # def training_step_end(self, outputs):
         # TODO: check that this works as intended
-        outputs = self.all_gather(outputs) # does this do what I expect it to do?
+
+        # outputs = self.all_gather(outputs) # does this do what I expect it to do?
         # for out in outputs:
         #     self.replaceOldestQueueEntry(out) # alternatively, we could concatenate all outputs into one tensor and append that tensor to the queue
-        concatenated_ouptuts = torch.tensor([]).cuda() # wow... still need to push it to the gpu for this to work smh...
-        for out in outputs:
-            concatenated_ouptuts = torch.cat((concatenated_ouptuts, out), dim=0) #is this correct? in particular, is dim=0 right?
-        self.replaceOldestQueueEntry(concatenated_ouptuts)
+        # concatenated_ouptuts = torch.tensor([]).cuda() # wow... still need to push it to the gpu for this to work smh...
+        # for out in outputs:
+        #     concatenated_ouptuts = torch.cat((concatenated_ouptuts, out), dim=0) #is this correct? in particular, is dim=0 right?
+        # self.replaceOldestQueueEntry(concatenated_ouptuts)
 
     def validation_step(self, val_batch, batch_idx):
         doc_samples = {"input_ids": val_batch["doc_input_ids"], "attention_mask": val_batch["doc_attention_mask"]}
@@ -284,6 +298,20 @@ class MoCoModelPTL(pl.LightningModule):
         del diagonal_l2_distances
         del l2_distance_matrix
 
+    # COPIED FROM https://github.com/PyTorchLightning/lightning-bolts/blob/5ab4faeaa4eca378b24d22e18316a2be4e9745b3/pl_bolts/models/self_supervised/moco/moco2_module.py#L348
+    @torch.no_grad()
+    def concat_all_gather(tensor):
+        """
+        Performs all_gather operation on the provided tensors.
+        *** Warning ***: torch.distributed.all_gather has no gradient.
+        """
+        tensors_gather = [torch.ones_like(tensor) for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+
+        output = torch.cat(tensors_gather, dim=0)
+        return output
+
+
 def execute():
     random.seed(0)
     torch.cuda.manual_seed_all(0)  # synch seed for weight initialization over all gpus (to ensure same initialization for MLP)
@@ -291,7 +319,7 @@ def execute():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     val_loader = generateDataLoader("code_search_net", "python", f"validation[:{validation_split_size}%]", tokenizer, batch_size=validation_batch_size, shuffle=False, augment=False)
 
-    model = MoCoModelPTL(max_queue_size=queue_size, update_weight=momentum_update_weight, model_name=model_name)
+    model = MoCoModelPTL(max_queue_size=queue_size, update_weight=momentum_update_weight, model_name=model_name, batch_size=batch_size)
 
     logger = pl.loggers.TensorBoardLogger("runs", name=f"batch_size_{batch_size}-queue_size_{queue_size}-max_epochs_{num_epochs}-train_split_{train_split_size}-val_split_{validation_split_size}-num_gpus_{num_gpus}")
 
