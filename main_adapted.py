@@ -20,6 +20,11 @@ from utils.data_loading import generateDataLoader
 
 import platform
 
+from datetime import date
+
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 #if platform.system() == "Linux":
    # from pl_bolts.utils import _PL_GREATER_EQUAL_1_4  # THIS WILL CRASH ON WINDOWS! MAKE SURE TO NOT USE DDP ON WINDOWS!
 
@@ -36,8 +41,9 @@ class Moco_v2(LightningModule):
         momentum: float = 0.9,
         weight_decay: float = 1e-4,
         data_dir: str = './',
-        batch_size: int = 8,
+        batch_size: int = 16,
         num_workers: int = 8,
+        augment: bool = True,
         *args,
         **kwargs
     ):
@@ -91,6 +97,9 @@ class Moco_v2(LightningModule):
         encoder_k = AutoModel.from_pretrained(base_encoder)
 
         return encoder_q, encoder_k
+
+    def train_dataloader(self): #generates a freshly augmented dataset
+        return  generateDataLoader("code_search_net", "python", f"train[:{args.train_split_size}%]", tokenizer, batch_size=batch_size, shuffle=True, augment=True)
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
@@ -223,16 +232,17 @@ class Moco_v2(LightningModule):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument('--base_encoder', type=str, default="microsoft/codebert-base")
         parser.add_argument('--num_workers', type=int, default=8)
-        parser.add_argument('--queue_size', type=int, default=32768)
+        parser.add_argument('--queue_size', type=int, default=32768) # might not work
         parser.add_argument("--num_epochs", type=int, default=10)
         parser.add_argument('--encoder_momentum', type=float, default=0.999)
         parser.add_argument('--softmax_temperature', type=float, default=0.07)
         parser.add_argument('--learning_rate', type=float, default=1e-5)
         parser.add_argument('--momentum', type=float, default=0.9)
         parser.add_argument('--weight_decay', type=float, default=1e-4)
-        parser.add_argument('--batch_size', type=int, default=2)
+        parser.add_argument('--batch_size', type=int, default=16) #this might also not work for epochs after the first one
         parser.add_argument("--train_split_size", type=int, default=1)
         parser.add_argument("--val_split_size", type=int, default=5)
+        parser.add_argument("--augment", type=bool, default=True) # this does not work! will need to fix this later
 
         return parser
 
@@ -276,10 +286,11 @@ def execute():
     model = Moco_v2(**args.__dict__)
 
     batch_size=args.batch_size
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"batch_size_{batch_size}-queue_size_{args.queue_size}-max_epochs_{args.num_epochs}-train_split_{args.train_split_size}-val_split_{args.val_split_size}-num_gpus_{torch.cuda.device_count()}")
+    date_formatted = date.today().strftime("%b-%d-%Y-%H-%M")
+    logger = pl.loggers.TensorBoardLogger("./runs/", name=f"{date_formatted}-batch_size={batch_size}-queue_size={args.queue_size}-max_epochs={args.num_epochs}-train_split={args.train_split_size}-val_split={args.val_split_size}-num_gpus={torch.cuda.device_count()}")
 
     # IMPORTANT: FOR TESTING ON WINDOWS, USE EITHER DP OR DDP_CPU BECAUSE DDP IS NOT SUPPORTED
-    trainer = pl.Trainer(gpus=-1, max_epochs=10, logger=logger, log_gpu_memory="all", precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"))  # , plugins="deepspeed") # maxepochs=1 because we want to augment after every epoch
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"), reload_dataloaders_every_n_epochs=1, plugins="deepspeed") # maxepochs=1 because we want to augment after every epoch
     # remove log_gpu_memory and fast_dev_run later because it may slow down training
 
     #for _ in range(args.num_epochs):
