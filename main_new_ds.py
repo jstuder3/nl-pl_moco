@@ -309,11 +309,12 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--max_queue_size", type=int, default=32)
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
+    parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=200) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--output_delay_time", type=int, default=20)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; DEBUG_data_skip_interval={args.debug_data_skip_interval};")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; base_data_folder={args.base_data_folder}")
 
     execute(args)
 

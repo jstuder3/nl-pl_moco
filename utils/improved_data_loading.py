@@ -128,7 +128,7 @@ def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=
 
     #load, preprocess, augment and tokenize data
 
-    examples = read_examples(f"datasets/CodeSearchNet/{language}/{split}.jsonl", args)
+    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args)
 
     if augment:
         for i in range(len(examples)):
