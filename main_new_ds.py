@@ -1,16 +1,14 @@
 # this code will later be adapted for PyTorchLightning. for simplicity, it will be based on just PyTorch for now
 
 import torch
-# import transformers
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoModel, AutoTokenizer
-from datasets import load_dataset
+
+from datetime import datetime
 import time
 import argparse
-import sys
-import re
 
 from utils.improved_data_loading import generateDataLoader
 
@@ -87,16 +85,89 @@ class MoCoModel(nn.Module):
     def currentQueueSize(self):
         return len(self.queue)
 
+def validation_computations(epoch, docs_list, code_list, base_path_acc, base_path_sim, substring=""):
+
+    # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
+
+    # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
+    logits = torch.matmul(docs_list, torch.transpose(code_list, 0, 1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
+
+    selection = torch.argmax(logits, dim=1)
+
+    # [COMPUTE TOP1 ACCURACY]
+    # the correct guess is always on the diagonal of the logits matrix
+    diagonal_label_tensor = torch.tensor([x for x in range(docs_list.shape[0])]).to(device)
+
+    top_1_correct_guesses = torch.sum(selection == diagonal_label_tensor)
+
+    top_1_accuracy = top_1_correct_guesses / docs_list.shape[0]  # accuracy is the fraction of correct guesses
+
+    print(f"Validation {substring} top_1 accuracy: {top_1_accuracy * 100:.3f}%")
+    writer.add_scalar(f"{base_path_acc}/top_1", top_1_accuracy * 100, epoch)
+
+    # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
+    # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
+    diagonal_values = torch.diagonal(logits)
+    # need to enforce column-wise broadcasting
+    ranks = torch.sum(logits >= torch.transpose(diagonal_values.view(1, -1), 0, 1),
+                      dim=1)  # sum up elements with >= similarity than positive embedding
+    mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
+
+    print(f"Validation {substring} MRR: {mrr:.4f}")
+    writer.add_scalar(f"{base_path_acc}/MRR", mrr, epoch)
+
+    # [COMPUTE TOP5 AND TOP10 ACCURACY]
+    # we can reuse the computation for the MRR
+    top_5_correct_guesses = torch.sum(ranks <= 5)
+    top_10_correct_guesses = torch.sum(ranks <= 10)
+
+    top_5_accuracy = top_5_correct_guesses / docs_list.shape[0]
+    top_10_accuracy = top_10_correct_guesses / docs_list.shape[0]
+    print(f"Validation {substring} top_5 accuracy: {top_5_accuracy * 100:.3f}%")
+    print(f"Validation {substring} top_10 accuracy: {top_10_accuracy * 100:.3f}%")
+    writer.add_scalar(f"{base_path_acc}/top_5", top_5_accuracy * 100, epoch)
+    writer.add_scalar(f"{base_path_acc}/top_10", top_10_accuracy * 100, epoch)
+
+    # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
+    avg_pos_cos_similarity = torch.mean(diagonal_values)
+    print(f"Validation {substring} avg_pos_cos_similarity: {avg_pos_cos_similarity:.6f}")
+    writer.add_scalar(f"{base_path_sim}/cosine/positive", avg_pos_cos_similarity, epoch)
+
+    # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
+    avg_neg_cos_similarity = torch.mean((torch.sum(logits, dim=1) - diagonal_values) / (docs_list.shape[0] - 1))
+    print(f"Validation {substring} avg_neg_cos_similarity: {avg_neg_cos_similarity:.6f}")
+    writer.add_scalar(f"{base_path_sim}/cosine/negative", avg_neg_cos_similarity, epoch)
+
+    # free (potentially) a lot of memory
+    del diagonal_values
+    del logits
+
+    # [COMPUTE AVERAGE POSITIVE/NEGATIVE L2 DISTANCE]
+    l2_distance_matrix = torch.cdist(docs_list, code_list, p=2)  # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
+    diagonal_l2_distances = torch.diagonal(l2_distance_matrix)
+
+    avg_pos_l2_distance = torch.mean(diagonal_l2_distances)
+    print(f"Validation {substring} avg_pos_l2_distance: {avg_pos_l2_distance:.6f}")
+    writer.add_scalar(f"{base_path_sim}/l2/positive", avg_pos_l2_distance, epoch)
+
+    # like for cosine similarity, compute average of negative similarities
+    avg_neg_l2_distance = torch.mean(
+        (torch.sum(l2_distance_matrix, dim=1) - diagonal_l2_distances) / (docs_list.shape[0] - 1))
+    print(f"Validation {substring} avg_neg_l2_distance: {avg_neg_l2_distance:.6f}")
+    writer.add_scalar(f"{base_path_sim}/l2/negative", avg_neg_l2_distance, epoch)
+
+    # for good measure
+    del diagonal_l2_distances
+    del l2_distance_matrix
 
 def execute(args):
 
-    from datetime import datetime
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
 
     # used for tensorboard logging
     global writer
-    writer = SummaryWriter(log_dir=f"runs/{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-debug_data_skip_interval_{args.debug_data_skip_interval}-num_gpus_{torch.cuda.device_count()}")
+    writer = SummaryWriter(log_dir=f"runs/{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-num_gpus_{torch.cuda.device_count()}")
 
     # [GENERATE TRAIN AND VALIDATION LOADER]
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -113,7 +184,10 @@ def execute(args):
     cross_entropy_loss = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)  # CodeBERT was pretrained using Adam
 
-    # [TRAINING LOOP]
+    #####################
+    ## [TRAINING LOOP] ##
+    #####################
+
     training_start_time = time.time()
     consoleOutputTime = time.time()
     queueHasNeverBeenFull = True
@@ -140,8 +214,9 @@ def execute(args):
             encoder_embeddings, positive_momentum_encoder_embeddings = model(doc_samples, code_samples)
 
             # should we normalize here?
-            encoder_embeddings=F.normalize(encoder_embeddings, p=2, dim=1)
-            positive_momentum_encoder_embeddings=F.normalize(positive_momentum_encoder_embeddings, p=2, dim=1)
+            if args.normalize_encoder_embeddings_during_training:
+                encoder_embeddings=F.normalize(encoder_embeddings, p=2, dim=1)
+                positive_momentum_encoder_embeddings=F.normalize(positive_momentum_encoder_embeddings, p=2, dim=1)
 
             # encoder_mlp contains the mlp output of the queries
             # pos_mlp_emb contains the mlp output of the positive keys
@@ -164,7 +239,6 @@ def execute(args):
             l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)),
                               pos_mlp_emb.view((current_batch_size, 128, 1)))
 
-            logits = None
             if neg_mlp_emb.shape[0] != 0:
                 # compute similarity of negaitve NL/PL pairs and concatenate with l_pos to get logits
                 l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), torch.transpose(neg_mlp_emb, 0, 1))
@@ -200,7 +274,10 @@ def execute(args):
             # update tensorboard
             writer.add_scalar("Loss/training", loss.item(), len(train_loader) * epoch + i)
 
-        # [VALIDATION LOOP] (after each epoch)
+        #######################
+        ## [VALIDATION LOOP] ##
+        #######################
+
         model.eval()
         docs_emb_list = torch.tensor([]).to(device)
         code_emb_list = torch.tensor([]).to(device)
@@ -244,173 +321,32 @@ def execute(args):
             mlp_docs_list = torch.cat((mlp_docs_list, mlp_docs), dim=0)
             mlp_code_list = torch.cat((mlp_code_list, mlp_code), dim=0)
 
-        # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
-
         assert (docs_emb_list.shape == code_emb_list.shape)
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
 
-        # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
-        logits = torch.matmul(docs_emb_list, torch.transpose(code_emb_list, 0, 1)) # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
+        assert (mlp_docs_list.shape == mlp_code_list.shape)
+        assert (mlp_docs_list.shape[1] == 128) # MLP embeddings are 128-dimensional
 
-        selection = torch.argmax(logits, dim=1)
-
-        # [COMPUTE TOP1 ACCURACY]
-        # the correct guess is always on the diagonal of the logits matrix
-        diagonal_label_tensor = torch.tensor([x for x in range(docs_emb_list.shape[0])]).to(device)
-
-        top_1_correct_guesses = torch.sum(selection == diagonal_label_tensor)
-
-        top_1_accuracy = top_1_correct_guesses / docs_emb_list.shape[0]  # accuracy is the fraction of correct guesses
-
-        print(f"Validation top_1 accuracy: {top_1_accuracy * 100:.3f}%")
-        writer.add_scalar("Accuracy/validation/top_1", top_1_accuracy * 100, epoch)
-
-        # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
-        # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
-        diagonal_values = torch.diagonal(logits)
-        # need to enforce column-wise broadcasting
-        ranks = torch.sum(logits >= torch.transpose(diagonal_values.view(1, -1), 0, 1),
-                          dim=1)  # sum up elements with >= similarity than positive embedding
-        mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
-
-        print(f"Validation MRR: {mrr:.4f}")
-        writer.add_scalar("Accuracy/validation/MRR", mrr, epoch)
-
-        # [COMPUTE TOP5 AND TOP10 ACCURACY]
-        # we can reuse the computation for the MRR
-        top_5_correct_guesses = torch.sum(ranks <= 5)
-        top_10_correct_guesses = torch.sum(ranks <= 10)
-
-        top_5_accuracy = top_5_correct_guesses / docs_emb_list.shape[0]
-        top_10_accuracy = top_10_correct_guesses / docs_emb_list.shape[0]
-        print(f"Validation top_5 accuracy: {top_5_accuracy * 100:.3f}%")
-        print(f"Validation top_10 accuracy: {top_10_accuracy * 100:.3f}%")
-        writer.add_scalar("Accuracy/validation/top_5", top_5_accuracy * 100, epoch)
-        writer.add_scalar("Accuracy/validation/top_10", top_10_accuracy * 100, epoch)
-
-        # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
-        avg_pos_cos_similarity = torch.mean(diagonal_values)
-        print(f"Validation avg_pos_cos_similarity: {avg_pos_cos_similarity:.6f}")
-        writer.add_scalar("Similarity/cosine/positive", avg_pos_cos_similarity, epoch)
-
-        # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
-        avg_neg_cos_similarity=torch.mean((torch.sum(logits, dim=1)-diagonal_values)/(docs_emb_list.shape[0]-1))
-        print(f"Validation avg_neg_cos_similarity: {avg_neg_cos_similarity:.6f}")
-        writer.add_scalar("Similarity/cosine/negative", avg_neg_cos_similarity, epoch)
-
-        # free (potentially) a lot of memory
-        del diagonal_values
-        del logits
-
-        # [COMPUTE AVERAGE POSITIVE/NEGATIVE L2 DISTANCE]
-        l2_distance_matrix=torch.cdist(docs_emb_list, code_emb_list, p=2) # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
-        diagonal_l2_distances=torch.diagonal(l2_distance_matrix)
-
-        avg_pos_l2_distance=torch.mean(diagonal_l2_distances)
-        print(f"Validation avg_pos_l2_distance: {avg_pos_l2_distance:.6f}")
-        writer.add_scalar("Similarity/l2/positive", avg_pos_l2_distance, epoch)
-
-        # like for cosine similarity, compute average of negative similarities
-        avg_neg_l2_distance=torch.mean((torch.sum(l2_distance_matrix, dim=1)-diagonal_l2_distances)/(docs_emb_list.shape[0]-1))
-        print(f"Validation avg_neg_l2_distance: {avg_neg_l2_distance:.6f}")
-        writer.add_scalar("Similarity/l2/negative", avg_neg_l2_distance, epoch)
-
-        # for good measure
-        del diagonal_l2_distances
-        del l2_distance_matrix
-        
-        ###### -------------------------- ########
-        # NOW USE THE MLP EMBEDDINGS TO DO THE SAME AS ABOVE
-        ###### -------------------------- ########
-
-        # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
-        logits = torch.matmul(mlp_docs_list, torch.transpose(mlp_code_list, 0, 1)) # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
-
-        selection = torch.argmax(logits, dim=1)
-
-        # [COMPUTE TOP1 ACCURACY]
-        # the correct guess is always on the diagonal of the logits matrix
-        diagonal_label_tensor = torch.tensor([x for x in range(mlp_docs_list.shape[0])]).to(device)
-
-        top_1_correct_guesses = torch.sum(selection == diagonal_label_tensor)
-
-        top_1_accuracy = top_1_correct_guesses / mlp_docs_list.shape[0]  # accuracy is the fraction of correct guesses
-
-        print(f"Validation MLP top_1 accuracy: {top_1_accuracy * 100:.3f}%")
-        writer.add_scalar("Accuracy/validation/MLP/top_1", top_1_accuracy * 100, epoch)
-
-        # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
-        # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
-        diagonal_values = torch.diagonal(logits)
-        # need to enforce column-wise broadcasting
-        ranks = torch.sum(logits >= torch.transpose(diagonal_values.view(1, -1), 0, 1),
-                          dim=1)  # sum up elements with >= similarity than positive embedding
-        mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
-
-        print(f"Validation MLP MRR: {mrr:.4f}")
-        writer.add_scalar("Accuracy/validation/MLP/MRR", mrr, epoch)
-
-        # [COMPUTE TOP5 AND TOP10 ACCURACY]
-        # we can reuse the computation for the MRR
-        top_5_correct_guesses = torch.sum(ranks <= 5)
-        top_10_correct_guesses = torch.sum(ranks <= 10)
-
-        top_5_accuracy = top_5_correct_guesses / mlp_docs_list.shape[0]
-        top_10_accuracy = top_10_correct_guesses / mlp_docs_list.shape[0]
-        print(f"Validation MLP top_5 accuracy: {top_5_accuracy * 100:.3f}%")
-        print(f"Validation MLP top_10 accuracy: {top_10_accuracy * 100:.3f}%")
-        writer.add_scalar("Accuracy/validation/MLP/top_5", top_5_accuracy * 100, epoch)
-        writer.add_scalar("Accuracy/validation/MLP/top_10", top_10_accuracy * 100, epoch)
-
-        # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
-        avg_pos_cos_similarity = torch.mean(diagonal_values)
-        print(f"Validation MLP avg_pos_cos_similarity: {avg_pos_cos_similarity:.6f}")
-        writer.add_scalar("Similarity/MLP/cosine/positive", avg_pos_cos_similarity, epoch)
-
-        # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
-        avg_neg_cos_similarity=torch.mean((torch.sum(logits, dim=1)-diagonal_values)/(docs_emb_list.shape[0]-1))
-        print(f"Validation MLP avg_neg_cos_similarity: {avg_neg_cos_similarity:.6f}")
-        writer.add_scalar("Similarity/MLP/cosine/negative", avg_neg_cos_similarity, epoch)
-
-        # free (potentially) a lot of memory
-        del diagonal_values
-        del logits
-
-        # [COMPUTE AVERAGE POSITIVE/NEGATIVE L2 DISTANCE]
-        l2_distance_matrix=torch.cdist(mlp_docs_list, code_emb_list, p=2) # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
-        diagonal_l2_distances=torch.diagonal(l2_distance_matrix)
-
-        avg_pos_l2_distance=torch.mean(diagonal_l2_distances)
-        print(f"Validation MLP avg_pos_l2_distance: {avg_pos_l2_distance:.6f}")
-        writer.add_scalar("Similarity/MLP/l2/positive", avg_pos_l2_distance, epoch)
-
-        # like for cosine similarity, compute average of negative similarities
-        avg_neg_l2_distance=torch.mean((torch.sum(l2_distance_matrix, dim=1)-diagonal_l2_distances)/(mlp_docs_list.shape[0]-1))
-        print(f"Validation MLP avg_neg_l2_distance: {avg_neg_l2_distance:.6f}")
-        writer.add_scalar("Similarity/MLP/l2/negative", avg_neg_l2_distance, epoch)
-
-        # for good measure
-        del diagonal_l2_distances
-        del l2_distance_matrix
-
-
+        validation_computations(epoch, docs_emb_list, code_emb_list, "Accuracy_enc/validation", "Similarity_enc", "on ENCODER")
+        validation_computations(epoch, mlp_docs_list, mlp_code_list, "Accuracy_MLP/validation", "Similarity_MLP", "on MLP")
 
 
 if __name__ == "__main__":
     # [PARSE ARGUMENTS] (if they are given, otherwise keep default value)
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="microsoft/codebert-base")
-    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--num_epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--max_queue_size", type=int, default=32)
+    parser.add_argument("--max_queue_size", type=int, default=64)
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", type=bool, default=True)
     parser.add_argument("--augment", type=bool, default=True)
+    parser.add_argument("--normalize_encoder_embeddings_during_training", type=bool, default=True)
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
-    parser.add_argument("--debug_data_skip_interval", type=int, default=200) # skips data during the loading process, which effectively makes us use a subset of the original data
-    parser.add_argument("--output_delay_time", type=int, default=20)
+    parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
+    parser.add_argument("--output_delay_time", type=int, default=50)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; base_data_folder={args.base_data_folder}")
