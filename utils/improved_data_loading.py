@@ -27,14 +27,14 @@ class Example(object):
         self.target = target
 
 #COPIED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/code2nl/run.py#L60
-def read_examples(filename, args):
+def read_examples(filename, args, ignore_debug=False): #ignore_debug can be used to e.g. always use the full validations set
     """Read examples from filename."""
     examples=[]
     counter=0
     with open(filename,encoding="utf-8") as f:
         for idx, line in enumerate(f):
 
-            if idx%args.debug_data_skip_interval==0:
+            if (ignore_debug) or (idx%args.debug_data_skip_interval==0):
                 if counter%100==0:
                     sys.stdout.write(f"\rData loading process: {idx}")
                     sys.stdout.flush()
@@ -128,7 +128,7 @@ def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=
 
     #load, preprocess, augment and tokenize data
 
-    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args)
+    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args, ignore_debug=(True if split=="valid" else False))
 
     if augment:
         for i in range(len(examples)):
