@@ -16,8 +16,7 @@ from utils.improved_data_loading import generateDataLoader
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# used for tensorboard logging
-writer = SummaryWriter()
+writer = None
 
 # [MODEL DEFINITION]
 class MoCoModel(nn.Module):
@@ -91,6 +90,14 @@ class MoCoModel(nn.Module):
 
 def execute(args):
 
+    from datetime import datetime
+    now = datetime.now()
+    now_str = now.strftime("%b%d_%H_%M_%S")
+
+    # used for tensorboard logging
+    global writer
+    writer = SummaryWriter(log_dir=f"{now_str}_batch_size={args.batch_size}-queue_size={args.max_queue_size}-max_epochs={args.num_epochs}-debug_data_skip_interval={args.debug_data_skip_interval}-num_gpus={torch.cuda.device_count()}")
+
     # [GENERATE TRAIN AND VALIDATION LOADER]
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
@@ -131,6 +138,10 @@ def execute(args):
 
             # compute outputs of finetuned CodeBERT encoder and momentum encoder
             encoder_embeddings, positive_momentum_encoder_embeddings = model(doc_samples, code_samples)
+
+            # should we normalize here?
+            encoder_embeddings=F.normalize(encoder_embeddings, p=2, dim=1)
+            positive_momentum_encoder_embeddings=F.normalize(positive_momentum_encoder_embeddings, p=2, dim=1)
 
             # encoder_mlp contains the mlp output of the queries
             # pos_mlp_emb contains the mlp output of the positive keys
