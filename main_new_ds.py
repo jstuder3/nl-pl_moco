@@ -167,7 +167,7 @@ def execute(args):
 
     # used for tensorboard logging
     global writer
-    writer = SummaryWriter(log_dir=f"runs/{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-num_gpus_{torch.cuda.device_count()}")
+    writer = SummaryWriter(log_dir=f"runs/{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-num_gpus_{torch.cuda.device_count()}")
 
     # [GENERATE TRAIN AND VALIDATION LOADER]
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -175,7 +175,7 @@ def execute(args):
     train_loader = generateDataLoader("python", "train", tokenizer, args, shuffle=args.shuffle, augment=args.augment)
 
     # we don't want to augment the validation set
-    val_loader = generateDataLoader("python", "valid", tokenizer, args, shuffle=False, augment=False)
+    val_loader = generateDataLoader("python", "valid", tokenizer, args, shuffle=args.shuffle, augment=False) #it shouldn't matter whether we shuffle the validation set or not
 
     # [GENERATE MODEL]
     model = MoCoModel(args).to(device)
@@ -341,15 +341,16 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--max_queue_size", type=int, default=64)
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
-    parser.add_argument("--shuffle", type=bool, default=True)
-    parser.add_argument("--augment", type=bool, default=True)
+    parser.add_argument("--shuffle", action="store_true", default=False)
+    parser.add_argument("--augment", action="store_true", default=False)
     parser.add_argument("--normalize_encoder_embeddings_during_training", type=bool, default=True)
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
+    parser.add_argument("--always_use_full_val", action="store_true", default=False)
     parser.add_argument("--output_delay_time", type=int, default=50)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; base_data_folder={args.base_data_folder}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}")
 
     execute(args)
 
