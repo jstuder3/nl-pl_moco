@@ -29,9 +29,10 @@ class MoCoModel(nn.Module):
         self.max_queue_size = args.max_queue_size
         self.update_weight = args.momentum_update_weight
 
-        # 768 is output size of CodeBERT (i.e. BERT_base), 2048 is the hidden layer size MoCoV2 uses and 128 is the output size that SimCLR uses
-        self.encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
-        self.momentum_encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
+        if not args.disable_mlp:
+            # 768 is output size of CodeBERT (i.e. BERT_base), 2048 is the hidden layer size MoCoV2 uses and 128 is the output size that SimCLR uses
+            self.encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
+            self.momentum_encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
 
     def forward(self, encoder_input, momentum_encoder_input, isInference=False):
         # note entirely sure but I think I may only need the "pooler_output" [bs, 768] and not the "last_hidden_state" [bs, 512, 768]
@@ -48,6 +49,9 @@ class MoCoModel(nn.Module):
         return encoder_output, momentum_encoder_output
 
     def mlp_forward(self, encoder_mlp_input, positive_momentum_encoder_mlp_input, isInference=False):
+
+        assert(not args.disable_mlp)
+
         encoder_mlp_output = self.encoder_mlp(encoder_mlp_input)
         positive_mlp_output = self.momentum_encoder_mlp(positive_momentum_encoder_mlp_input)
         # only compute the mlp forwards of the queue entries if we're in training
@@ -84,6 +88,13 @@ class MoCoModel(nn.Module):
 
     def currentQueueSize(self):
         return len(self.queue)
+
+    def concatAllQueueEntries(self):
+        concat_tensor = torch.tensor([]).to(device)
+        for queue_entry in self.queue:
+            concat_tensor = torch.cat((concat_tensor, queue_entry), axis=0)
+        return concat_tensor
+
 
 def validation_computations(epoch, docs_list, code_list, base_path_acc, base_path_sim, substring=""):
 
@@ -167,7 +178,7 @@ def execute(args):
 
     # used for tensorboard logging
     global writer
-    writer = SummaryWriter(log_dir=f"runs/{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-num_gpus_{torch.cuda.device_count()}")
+    writer = SummaryWriter(log_dir=f"runs/{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
     # [GENERATE TRAIN AND VALIDATION LOADER]
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -214,15 +225,20 @@ def execute(args):
             encoder_embeddings, positive_momentum_encoder_embeddings = model(doc_samples, code_samples)
 
             # should we normalize here?
-            if args.normalize_encoder_embeddings_during_training:
+            if args.normalize_encoder_embeddings_during_training and (not args.disable_mlp): #if the mlp is disabled, we would normalize twice, so we can skip this block
                 encoder_embeddings=F.normalize(encoder_embeddings, p=2, dim=1)
                 positive_momentum_encoder_embeddings=F.normalize(positive_momentum_encoder_embeddings, p=2, dim=1)
 
-            # encoder_mlp contains the mlp output of the queries
-            # pos_mlp_emb contains the mlp output of the positive keys
-            # neg_mlp_emb contains the mlp output of all of the negative keys in the queue
-            encoder_mlp, pos_mlp_emb, neg_mlp_emb = model.mlp_forward(encoder_embeddings,
+            if not args.disable_mlp:
+                # encoder_mlp contains the mlp output of the queries
+                # pos_mlp_emb contains the mlp output of the positive keys
+                # neg_mlp_emb contains the mlp output of all of the negative keys in the queue
+                encoder_mlp, pos_mlp_emb, neg_mlp_emb = model.mlp_forward(encoder_embeddings,
                                                                       positive_momentum_encoder_embeddings)
+            else:
+                encoder_mlp=encoder_embeddings
+                pos_mlp_emb=positive_momentum_encoder_embeddings
+                neg_mlp_emb = model.concatAllQueueEntries()
 
             # normalize the length of the embeddings (we want them to be unit vectors for cosine similarity to work correctly)
             encoder_mlp = F.normalize(encoder_mlp, p=2, dim=1)
@@ -236,12 +252,12 @@ def execute(args):
             optimizer.zero_grad()
 
             # compute similarity of positive NL/PL pairs
-            l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, 128)),
-                              pos_mlp_emb.view((current_batch_size, 128, 1)))
+            l_pos = torch.bmm(encoder_mlp.view((current_batch_size, 1, -1)),
+                              pos_mlp_emb.view((current_batch_size, -1, 1)))
 
             if neg_mlp_emb.shape[0] != 0:
                 # compute similarity of negaitve NL/PL pairs and concatenate with l_pos to get logits
-                l_neg = torch.matmul(encoder_mlp.view((current_batch_size, 128)), torch.transpose(neg_mlp_emb, 0, 1))
+                l_neg = torch.matmul(encoder_mlp.view((current_batch_size, -1)), torch.transpose(neg_mlp_emb, 0, 1))
                 logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
             else:
                 logits = l_pos.view((current_batch_size, 1))
@@ -268,7 +284,7 @@ def execute(args):
             if queueHasNeverBeenFull and model.currentQueueSize() >= model.max_queue_size:
                 cqs = model.currentQueueSize()
                 print(
-                    f"Queue is now full for the first time with {cqs} batches or roughly {args.batch_size * cqs} samples")
+                    f"Queue is now full for the first time with {cqs} batches or {args.batch_size * cqs} samples")
                 queueHasNeverBeenFull = False
 
             # update tensorboard
@@ -300,35 +316,37 @@ def execute(args):
 
             # [FORWARD PASS]
             with torch.no_grad():
-                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=True)  # set to false for experimentation purposes
-                # docs_mlp_embeddings, code_mlp_embeddings=model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
-                # docs_mlp_embeddings=F.normalize(docs_mlp_embeddings, p=2, dim=1)
-                # code_mlp_embeddings=F.normalize(code_mlp_embeddings, p=2, dim=1)
+                docs_embeddings, code_embeddings = model(doc_samples, code_samples, isInference=True)
 
                 # normalize to ensure correct cosine similarity
                 docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
                 code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
 
                 # should this be done before or after normalizing the embeddings?
-                mlp_docs, mlp_code = model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
-                mlp_docs = F.normalize(mlp_docs, p=2, dim=1)
-                mlp_code = F.normalize(mlp_code, p=2, dim=1)
+                if not args.disable_mlp:
+                    mlp_docs, mlp_code = model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
+                    mlp_docs = F.normalize(mlp_docs, p=2, dim=1)
+                    mlp_code = F.normalize(mlp_code, p=2, dim=1)
 
 
             # we need to find the best match for each NL sample in the entire validation set, so store everything for now
             docs_emb_list = torch.cat((docs_emb_list, docs_embeddings), dim=0)
             code_emb_list = torch.cat((code_emb_list, code_embeddings), dim=0)
-            mlp_docs_list = torch.cat((mlp_docs_list, mlp_docs), dim=0)
-            mlp_code_list = torch.cat((mlp_code_list, mlp_code), dim=0)
+            if not args.disable_mlp:
+                mlp_docs_list = torch.cat((mlp_docs_list, mlp_docs), dim=0)
+                mlp_code_list = torch.cat((mlp_code_list, mlp_code), dim=0)
 
         assert (docs_emb_list.shape == code_emb_list.shape)
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
-
-        assert (mlp_docs_list.shape == mlp_code_list.shape)
-        assert (mlp_docs_list.shape[1] == 128) # MLP embeddings are 128-dimensional
-
         validation_computations(epoch, docs_emb_list, code_emb_list, "Accuracy_enc/validation", "Similarity_enc", "on ENCODER")
-        validation_computations(epoch, mlp_docs_list, mlp_code_list, "Accuracy_MLP/validation", "Similarity_MLP", "on MLP")
+
+        if not args.disable_mlp:
+            assert (mlp_docs_list.shape == mlp_code_list.shape)
+            assert (mlp_docs_list.shape[1] == 128) # MLP embeddings are 128-dimensional
+            validation_computations(epoch, mlp_docs_list, mlp_code_list, "Accuracy_MLP/validation", "Similarity_MLP", "on MLP")
+
+
+
 
 
 if __name__ == "__main__":
@@ -343,14 +361,15 @@ if __name__ == "__main__":
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", action="store_true", default=False)
     parser.add_argument("--augment", action="store_true", default=False)
-    parser.add_argument("--normalize_encoder_embeddings_during_training", type=bool, default=True)
+    parser.add_argument("--normalize_encoder_embeddings_during_training", type=bool, default=True) #always on for now
+    parser.add_argument("--disable_mlp", action="store_true", default=False)
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
     parser.add_argument("--output_delay_time", type=int, default=50)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}")
 
     execute(args)
 
