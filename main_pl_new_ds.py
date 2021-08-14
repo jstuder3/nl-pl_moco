@@ -8,6 +8,8 @@ import random
 from datetime import datetime
 import time
 import numpy as np
+import multiprocessing
+import math
 
 from utils.improved_data_loading import generateDataLoader
 
@@ -35,11 +37,11 @@ class MoCoModelPTL(pl.LightningModule):
         return optimizer
 
     def train_dataloader(self):
-        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment)
+        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return train_loader
 
     def val_dataloader(self):
-        val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, shuffle=False, augment=False)
+        val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, shuffle=False, augment=False, num_workers=int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return val_loader
 
     def update_momentum_encoder(self):
@@ -363,5 +365,3 @@ if __name__ == "__main__":
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}")
 
     execute(args)
-
-    writer.close()

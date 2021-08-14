@@ -122,7 +122,7 @@ def convert_examples_to_features(examples, tokenizer, stage=None):
     return features
 
 # ADAPTED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/code2nl/run.py
-def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=False):
+def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=False, num_workers=0):
     # we may want to augment several times independently and reloading the original data every time
     # is the only way I could find to make sure we start from the original data every time (Datasets have no copy method)
 
@@ -157,7 +157,7 @@ def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=
     # source: code; target: nl
     data = CodeSearchNetDataset({"input_ids": all_target_ids, "attention_mask": all_target_mask}, {"input_ids": all_source_ids, "attention_mask": all_source_mask})
 
-    dataloader = DataLoader(data, batch_size=args.batch_size, drop_last=True, shuffle=shuffle)
+    dataloader = DataLoader(data, batch_size=args.batch_size, drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
     return dataloader
 
