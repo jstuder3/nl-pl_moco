@@ -10,6 +10,7 @@ import time
 import numpy as np
 import multiprocessing
 import math
+import platform
 
 from utils.improved_data_loading import generateDataLoader
 
@@ -180,8 +181,7 @@ class MoCoModelPTL(pl.LightningModule):
         # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
         # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
-        logits = torch.matmul(docs_list, torch.transpose(code_list, 0,
-                                                         1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
+        logits = torch.matmul(docs_list, torch.transpose(code_list, 0, 1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
 
         selection = torch.argmax(logits, dim=1)
 
@@ -193,7 +193,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         top_1_accuracy = top_1_correct_guesses / docs_list.shape[0]  # accuracy is the fraction of correct guesses
 
-        self.log(f"{base_path_acc}/top_1", top_1_accuracy * 100)
+        self.log_dict({f"{base_path_acc}/top_1": top_1_accuracy * 100, "step": self.current_epoch}, on_epoch=True)
 
         # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
@@ -205,7 +205,7 @@ class MoCoModelPTL(pl.LightningModule):
                           dim=1)  # sum up elements with >= similarity than positive embedding
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
-        self.log(f"{base_path_acc}/MRR", mrr)
+        self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, )
 
         # [COMPUTE TOP5 AND TOP10 ACCURACY]
         # we can reuse the computation for the MRR
@@ -214,16 +214,16 @@ class MoCoModelPTL(pl.LightningModule):
 
         top_5_accuracy = top_5_correct_guesses / docs_list.shape[0]
         top_10_accuracy = top_10_correct_guesses / docs_list.shape[0]
-        self.log(f"{base_path_acc}/top_5", top_5_accuracy * 100)
-        self.log(f"{base_path_acc}/top_10", top_10_accuracy * 100)
+        self.log_dict({f"{base_path_acc}/top_5": top_5_accuracy * 100, "step": self.current_epoch},on_epoch=True)
+        self.log_dict({f"{base_path_acc}/top_10": top_10_accuracy * 100, "step": self.current_epoch}, on_epoch=True)
 
         # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
         avg_pos_cos_similarity = torch.mean(label_similarities)
-        self.log(f"{base_path_sim}/cosine/positive", avg_pos_cos_similarity)
+        self.log_dict({f"{base_path_sim}/cosine/positive": avg_pos_cos_similarity, "step": self.current_epoch}, on_epoch=True)
 
         # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
         avg_neg_cos_similarity = torch.mean((torch.sum(logits, dim=1) - label_similarities) / (code_list.shape[0] - 1))
-        self.log(f"{base_path_sim}/cosine/negative", avg_neg_cos_similarity)
+        self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True)
 
         # free (potentially) a lot of memory
         del label_similarities
@@ -231,19 +231,17 @@ class MoCoModelPTL(pl.LightningModule):
 
         # [COMPUTE AVERAGE POSITIVE/NEGATIVE L2 DISTANCE]
         # this might not work...
-        l2_distance_matrix = torch.cdist(docs_list, code_list,
-                                         p=2)  # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
+        l2_distance_matrix = torch.cdist(docs_list, code_list, p=2)  # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
 
         l2_label_list = [l2_distance_matrix[i][int(labels[i].item())].item() for i in range(docs_list.shape[0])]
         label_distances = torch.tensor(l2_label_list).cuda()
 
         avg_pos_l2_distance = torch.mean(label_distances)
-        self.log(f"{base_path_sim}/l2/positive", avg_pos_l2_distance)
+        self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True)
 
         # like for cosine similarity, compute average of negative similarities
-        avg_neg_l2_distance = torch.mean(
-            (torch.sum(l2_distance_matrix, dim=1) - label_distances) / (code_list.shape[0] - 1))
-        self.log(f"{base_path_sim}/l2/negative", avg_neg_l2_distance)
+        avg_neg_l2_distance = torch.mean((torch.sum(l2_distance_matrix, dim=1) - label_distances) / (code_list.shape[0] - 1))
+        self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True)
 
         # for good measure
         del label_distances
@@ -337,7 +335,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, reload_dataloaders_every_n_epochs=1, precision=16, accelerator="dp")#"ddp", plugins="deepspeed")
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"), plugins = ("deepspeed" if platform.system()=="Linux" else ""))#"ddp", plugins="deepspeed")
 
     trainer.fit(model)
 
@@ -346,7 +344,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="microsoft/codebert-base")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--max_queue_size", type=int, default=64)
@@ -356,9 +354,9 @@ if __name__ == "__main__":
     parser.add_argument("--normalize_encoder_embeddings_during_training", type=bool, default=True) #always on for now
     parser.add_argument("--disable_mlp", action="store_true", default=False)
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
-    parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
+    parser.add_argument("--debug_data_skip_interval", type=int, default=400) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
-    parser.add_argument("--output_delay_time", type=int, default=50)
+    #parser.add_argument("--output_delay_time", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
     args = parser.parse_args()
