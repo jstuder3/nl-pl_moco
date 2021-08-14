@@ -307,12 +307,12 @@ class MoCoModelPTL(pl.LightningModule):
             if index % world_size == local_rank:
                 labels=torch.cat((labels, output["index"]), dim=0)
 
-        assert (docs_emb_list.shape == code_emb_list.shape)
+        # assert (docs_emb_list.shape == code_emb_list.shape)
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
         self.validation_computations(docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc")
 
         if not self.args.disable_mlp:
-            assert (mlp_docs_list.shape == mlp_code_list.shape)
+            # assert (mlp_docs_list.shape == mlp_code_list.shape)
             assert (mlp_docs_list.shape[1] == 128)  # MLP embeddings are 128-dimensional
             self.validation_computations(mlp_docs_list, mlp_code_list, labels, "Accuracy_MLP/validation", "Similarity_MLP")
 
@@ -335,7 +335,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"), plugins = ("deepspeed" if platform.system()=="Linux" else ""))#"ddp", plugins="deepspeed")
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, precision=16, accelerator="dp")#("ddp" if platform.system()=="Linux" else "dp"))#, plugins = ("deepspeed" if platform.system()=="Linux" else ""))#"ddp", plugins="deepspeed")
 
     trainer.fit(model)
 
