@@ -37,11 +37,11 @@ class MoCoModelPTL(pl.LightningModule):
         return optimizer
 
     def train_dataloader(self):
-        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return train_loader
 
     def val_dataloader(self):
-        val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, shuffle=False, augment=False, num_workers=int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return val_loader
 
     def update_momentum_encoder(self):
@@ -346,7 +346,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="microsoft/codebert-base")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--max_queue_size", type=int, default=64)
@@ -360,8 +360,9 @@ if __name__ == "__main__":
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
     parser.add_argument("--output_delay_time", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=0)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}")
 
     execute(args)
