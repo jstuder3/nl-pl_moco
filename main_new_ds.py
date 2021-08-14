@@ -256,7 +256,7 @@ def execute(args):
                               pos_mlp_emb.view((current_batch_size, -1, 1)))
 
             if neg_mlp_emb.shape[0] != 0:
-                # compute similarity of negaitve NL/PL pairs and concatenate with l_pos to get logits
+                # compute similarity of negative NL/PL pairs and concatenate with l_pos to get logits
                 l_neg = torch.matmul(encoder_mlp.view((current_batch_size, -1)), torch.transpose(neg_mlp_emb, 0, 1))
                 logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
             else:
@@ -327,7 +327,6 @@ def execute(args):
                     mlp_docs, mlp_code = model.mlp_forward(docs_embeddings, code_embeddings, isInference=True)
                     mlp_docs = F.normalize(mlp_docs, p=2, dim=1)
                     mlp_code = F.normalize(mlp_code, p=2, dim=1)
-
 
             # we need to find the best match for each NL sample in the entire validation set, so store everything for now
             docs_emb_list = torch.cat((docs_emb_list, docs_embeddings), dim=0)

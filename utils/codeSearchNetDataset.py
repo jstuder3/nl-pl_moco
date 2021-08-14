@@ -10,6 +10,7 @@ class CodeSearchNetDataset(torch.utils.data.Dataset):
         if type(self.doc_tokens["input_ids"])==torch.Tensor:
             item = {"doc_" + key: val[index] for key, val in self.doc_tokens.items()}
             item = item | {"code_" + key: val[index] for key, val in self.code_tokens.items()}  # this syntax requires python 3.9+
+            item = item | {"index": index}
         else:
             item = {"doc_" + key: torch.tensor(val[index]) for key, val in self.doc_tokens.items()}
             item = item | {"code_" + key: torch.tensor(val[index]) for key, val in self.code_tokens.items()}  # this syntax requires python 3.9+

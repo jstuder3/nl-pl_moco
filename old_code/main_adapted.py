@@ -290,7 +290,7 @@ def execute():
     logger = pl.loggers.TensorBoardLogger("./runs/", name=f"{date_formatted}-batch_size={batch_size}-queue_size={args.queue_size}-max_epochs={args.num_epochs}-train_split={args.train_split_size}-val_split={args.val_split_size}-num_gpus={torch.cuda.device_count()}")
 
     # IMPORTANT: FOR TESTING ON WINDOWS, USE EITHER DP OR DDP_CPU BECAUSE DDP IS NOT SUPPORTED
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"), reload_dataloaders_every_n_epochs=1, plugins="deepspeed") # maxepochs=1 because we want to augment after every epoch
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, precision=16, accelerator=("ddp" if platform.system()=="Linux" else "dp"), reload_dataloaders_every_n_epochs=1, plugins="deepspeed")
     # remove log_gpu_memory and fast_dev_run later because it may slow down training
 
     #for _ in range(args.num_epochs):
