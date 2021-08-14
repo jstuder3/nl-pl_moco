@@ -21,11 +21,16 @@ class MoCoModelPTL(pl.LightningModule):
         self.tokenizer = AutoTokenizer.from_pretrained(self.args.model_name)
         self.encoder = AutoModel.from_pretrained(self.args.model_name)
         self.momentum_encoder = AutoModel.from_pretrained(self.args.model_name)
-        self.queue = []
-        self.current_index = 0
+
         self.max_queue_size = self.args.max_queue_size
         self.update_weight = self.args.momentum_update_weight
         self.batch_size = self.args.batch_size
+
+        #self.queue = [] # this causes issues in multi-gpu settings, so we need to replace it with a register_buffer
+        self.register_buffer("queue", torch.randn(self.max_queue_size*self.batch_size, 768)) # queue has dimensions [queue_size*batch_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
+        self.register_buffer("current_index", torch.zeros(1, dtype=torch.long))
+        #self.current_index = 0 # for good measure, this is also replaced with a register_buffer
+
         if not self.args.disable_mlp:
             # 768 is output size of CodeBERT (i.e. BERT_base), 2048 is the hidden layer size MoCoV2 uses and 128 is the output size that SimCLR uses
             self.encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
@@ -56,31 +61,24 @@ class MoCoModelPTL(pl.LightningModule):
 
         # DIFFERENCE TO SINGLE-GPU IMPLEMENTATION: NEED TO GATHER THE CODE EMBEDDINGS OF ALL OTHER GPUS OF THIS ITERATION
 
-        gatheredNewEntries = self.concatAllGather(newEntry)
+        gatheredNewEntries = self.concatAllGather(newEntry) # this could be problematic; need to check that this returns a tenosr of shape [batch_size, 768] instead of [batch_size/num_gpus, 768]
 
         # this function will replace the oldest ("most stale") entry of the queue
-
-        queueIsFull = (len(self.queue) >= self.max_queue_size)
-        # if the queue is full, replace the oldest entry
-        if queueIsFull:
-            self.queue[self.current_index] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
-        # else: queue is not yet full
-        else:
-            self.queue.append(gatheredNewEntries.detach())
-        self.current_index = (self.current_index + 1) % self.max_queue_size  # potential for off-by-one error
-
-        return queueIsFull  # returning this isn't necessary but might be useful
+        pointer = int(self.current_index)
+        self.queue[pointer : pointer+self.batch_size, :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
+        self.current_index[0] = (self.current_index+self.batch_size) % (self.max_queue_size*self.batch_size) #current_index should point at the beginning of a "block" of size batch_size
 
     def concatAllQueueEntries(self):
-        concat_tensor = torch.tensor([]).cuda()
-        for queue_entry in self.queue:
-            concat_tensor = torch.cat((concat_tensor, queue_entry), axis=0)
-        return concat_tensor
+        #concat_tensor = torch.tensor([]).cuda()
+        #for queue_entry in self.queue:
+        #    concat_tensor = torch.cat((concat_tensor, queue_entry), dim=0)
+        return self.queue # the register_buffer version is already concatenated
+        #return concat_tensor
 
     def concatAllGather(self, tensor):
-        tensors_gather=self.all_gather(tensor) #if we only have one gpu, then this will return [bs, emb_dim], but if we have more than one, it will return [world_size, bs, emb_dim]... wtf...?!
-        if torch.cuda.device_count()>1: # hacky workaround
-            cache_tensor = torch.tensor([]).cuda()
+        tensors_gather=self.all_gather(tensor) #on dp, this will return [bs, emb_dim], but if we have ddp, it will return [world_size, bs, emb_dim]... wtf...?!
+        if self.args.accelerator=="ddp": # hacky workaround
+            cache_tensor = torch.tensor([]).type_as(tensor)
             for elem in tensors_gather:
                 cache_tensor = torch.cat((cache_tensor, elem), dim=0)
             return cache_tensor
@@ -108,11 +106,7 @@ class MoCoModelPTL(pl.LightningModule):
         positive_mlp_output = self.momentum_encoder_mlp(positive_momentum_encoder_mlp_input)
         # only compute the mlp forwards of the queue entries if we're in training
         if not isInference:
-            momentum_encoder_mlp_output = torch.tensor([]).cuda()
-            # the queue only contains negative samples
-            for index, queue_entry in enumerate(self.queue):
-                mlp_output = self.momentum_encoder_mlp(queue_entry)
-                momentum_encoder_mlp_output = torch.cat((momentum_encoder_mlp_output, mlp_output), axis=0)
+            momentum_encoder_mlp_output = self.momentum_encoder_mlp(self.queue) # this is not optimal, because every gpu has to compute the mlp_forward of every queue entry (could in theory split this up and then all_gather, but that's again annoyingly complicated to debug)
             return encoder_mlp_output, positive_mlp_output, momentum_encoder_mlp_output
         else:  # isInference=True
             return encoder_mlp_output, positive_mlp_output
@@ -168,7 +162,7 @@ class MoCoModelPTL(pl.LightningModule):
             logits = l_pos.view((current_batch_size, 1))
 
         # labels: l_pos should always contain the smallest values
-        labels = torch.tensor([0 for h in range(current_batch_size)]).cuda()  # ugly but does the job
+        labels = torch.tensor([0 for h in range(current_batch_size)]).type_as(code_samples)  # ugly but does the job
 
         loss = nn.CrossEntropyLoss()(logits / self.args.temperature, labels)
 
@@ -198,7 +192,7 @@ class MoCoModelPTL(pl.LightningModule):
         # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
         label_list = [logits[i][int(labels[i].item())].item() for i in range(docs_list.shape[0])]
-        label_similarities = torch.tensor(label_list).cuda()
+        label_similarities = torch.tensor(label_list).type_as(docs_list)
 
         # need to enforce column-wise broadcasting
         ranks = torch.sum(logits >= torch.transpose(label_similarities.view(1, -1), 0, 1),
@@ -234,7 +228,7 @@ class MoCoModelPTL(pl.LightningModule):
         l2_distance_matrix = torch.cdist(docs_list, code_list, p=2)  # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
 
         l2_label_list = [l2_distance_matrix[i][int(labels[i].item())].item() for i in range(docs_list.shape[0])]
-        label_distances = torch.tensor(l2_label_list).cuda()
+        label_distances = torch.tensor(l2_label_list).type_as(docs_list)
 
         avg_pos_l2_distance = torch.mean(label_distances)
         self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True)
@@ -278,9 +272,9 @@ class MoCoModelPTL(pl.LightningModule):
 
         #outputs = self.concatAllGather(outputs) # won't need this because validation_step_end already all_gathers
 
-        code_emb_list = torch.tensor([]).cuda()
+        code_emb_list = torch.tensor([]).type_as(outputs)
         if not self.args.disable_mlp:
-            mlp_code_list = torch.tensor([]).cuda()
+            mlp_code_list = torch.tensor([]).type_as(outputs)
 
         for output in outputs:
             code_emb_list = torch.cat((code_emb_list, output["code_embeddings"]), dim=0)
@@ -291,9 +285,9 @@ class MoCoModelPTL(pl.LightningModule):
         world_size = torch.cuda.device_count()
         local_rank = self.global_rank
 
-        docs_emb_list = torch.tensor([]).cuda()
+        docs_emb_list = torch.tensor([]).type_as(outputs)
         if not self.args.disable_mlp:
-            mlp_docs_list = torch.tensor([]).cuda()
+            mlp_docs_list = torch.tensor([]).type_as(outputs)
 
         for index, output in enumerate(outputs):
             if index%world_size==local_rank:
@@ -301,7 +295,7 @@ class MoCoModelPTL(pl.LightningModule):
                 if not self.args.disable_mlp:
                     mlp_docs_list = torch.cat((mlp_docs_list, output["mlp_docs"]), dim=0)
 
-        labels = torch.tensor([]).cuda()
+        labels = torch.tensor([]).type_as(outputs)
 
         for index, output in enumerate(outputs):
             if index % world_size == local_rank:
@@ -335,7 +329,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, precision=16, accelerator="dp")#("ddp" if platform.system()=="Linux" else "dp"))#, plugins = ("deepspeed" if platform.system()=="Linux" else ""))#"ddp", plugins="deepspeed")
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
@@ -356,9 +350,11 @@ if __name__ == "__main__":
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=400) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
-    #parser.add_argument("--output_delay_time", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--accelerator", type=str, default="dp")
+    parser.add_argument("--plugins", type=str, default="")
+    parser.add_argument("--precision", type=int, default=16)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}")
