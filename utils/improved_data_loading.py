@@ -154,6 +154,8 @@ def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=
     all_target_ids = torch.tensor([f.target_ids for f in features], dtype=torch.long)
     all_target_mask = torch.tensor([f.target_mask for f in features], dtype=torch.long)
 
+    # index_tensor = torch.tensor([i for i in range(all_target_ids.shape[0])])
+
     # source: code; target: nl
     data = CodeSearchNetDataset({"input_ids": all_target_ids, "attention_mask": all_target_mask}, {"input_ids": all_source_ids, "attention_mask": all_source_mask})
 

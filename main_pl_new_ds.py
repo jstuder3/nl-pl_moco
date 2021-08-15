@@ -12,6 +12,8 @@ import multiprocessing
 import math
 import platform
 
+import torch.distributed as dist
+
 from utils.improved_data_loading import generateDataLoader
 
 class MoCoModelPTL(pl.LightningModule):
@@ -76,13 +78,18 @@ class MoCoModelPTL(pl.LightningModule):
         #return concat_tensor
 
     def concatAllGather(self, tensor):
-        tensors_gather=self.all_gather(tensor) #on dp, this will return [bs, emb_dim], but if we have ddp, it will return [world_size, bs, emb_dim]... wtf...?!
-        if self.args.accelerator=="ddp": # hacky workaround
-            cache_tensor = torch.tensor([]).type_as(tensor)
-            for elem in tensors_gather:
-                cache_tensor = torch.cat((cache_tensor, elem), dim=0)
-            return cache_tensor
-        return tensors_gather
+        gathered_tensors = self.all_gather(tensor)
+        print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and gathered tensor shape of {gathered_tensors.shape}")
+        #gathered_tensors = torch.cat(gathered_tensors, dim=0)
+        cache_tensor = torch.tensor([]).type_as(tensor)
+        for elem in gathered_tensors:
+            cache_tensor=torch.cat((cache_tensor, torch.squeeze(elem)), dim=0)
+        print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and post-concat cache_tensor shape of {cache_tensor.shape}")
+        return cache_tensor
+       # tensor_list = [tensor.ones_like(tensor) for _ in range(torch.cuda.device_count())]
+       # torch.distributed.all_gather(tensor_list, tensor)
+       # tensors_gather = torch.cat(tensor_list, dim=0)
+       # return tensors_gather
 
     def forward(self, encoder_input, momentum_encoder_input, isInference=False):
         # note entirely sure but I think I may only need the "pooler_output" [bs, 768] and not the "last_hidden_state" [bs, 512, 768]
@@ -116,6 +123,9 @@ class MoCoModelPTL(pl.LightningModule):
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
 
         current_batch_size = doc_samples["input_ids"].shape[0]
+
+        print(doc_samples["input_ids"].shape)
+        print(f"In training_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}")
 
         # [UPDATE MOMENTUM ENCODER]
         self.update_momentum_encoder()
@@ -162,7 +172,7 @@ class MoCoModelPTL(pl.LightningModule):
             logits = l_pos.view((current_batch_size, 1))
 
         # labels: l_pos should always contain the smallest values
-        labels = torch.tensor([0 for h in range(current_batch_size)]).type_as(code_samples)  # ugly but does the job
+        labels = torch.tensor([0 for h in range(current_batch_size)]).type_as(code_samples["input_ids"])  # ugly but does the job
 
         loss = nn.CrossEntropyLoss()(logits / self.args.temperature, labels)
 
@@ -172,10 +182,14 @@ class MoCoModelPTL(pl.LightningModule):
 
     def validation_computations(self, docs_list, code_list, labels, base_path_acc, base_path_sim):
 
+        print(f"validation_computations called on {self.global_rank} with shapes: doc_list - {docs_list.shape}, code_list - {code_list.shape}, labels - {labels.shape} and value labels - {labels}")
+
         # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
         # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
         logits = torch.matmul(docs_list, torch.transpose(code_list, 0, 1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
+
+        print(f"logits in validation_computations on {self.global_rank} has shape {logits.shape}")
 
         selection = torch.argmax(logits, dim=1)
 
@@ -191,7 +205,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
-        label_list = [logits[i][int(labels[i].item())].item() for i in range(docs_list.shape[0])]
+        label_list = [logits[i][int(labels[i].item())].item() for i in range(labels.shape[0])]
         label_similarities = torch.tensor(label_list).type_as(docs_list)
 
         # need to enforce column-wise broadcasting
@@ -227,7 +241,9 @@ class MoCoModelPTL(pl.LightningModule):
         # this might not work...
         l2_distance_matrix = torch.cdist(docs_list, code_list, p=2)  # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
 
-        l2_label_list = [l2_distance_matrix[i][int(labels[i].item())].item() for i in range(docs_list.shape[0])]
+        print(f"l2_distance_matrix in validation_computation on {self.global_rank} has shape {l2_distance_matrix.shape}")
+
+        l2_label_list = [l2_distance_matrix[i][int(labels[i].item())].item() for i in range(labels.shape[0])]
         label_distances = torch.tensor(l2_label_list).type_as(docs_list)
 
         avg_pos_l2_distance = torch.mean(label_distances)
@@ -244,6 +260,8 @@ class MoCoModelPTL(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
+
+        print(f"In validation_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}")
 
         with torch.no_grad():
             docs_embeddings, code_embeddings = self(doc_samples, code_samples, isInference=True)
@@ -267,14 +285,16 @@ class MoCoModelPTL(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
 
-        # to validate in parallel, we need to first obtain the complete code embedding matrix.
+        print(f"In validation_epoch_end on {self.global_rank}, outputs[0][\"docs_embeddings\"] has shape {outputs[0]['docs_embeddings'].shape}")
+
+# to validate in parallel, we need to first obtain the complete code embedding matrix.
         # afterwards, we can compute the pairwise cosine similarity, but just on a subset of the data
 
         #outputs = self.concatAllGather(outputs) # won't need this because validation_step_end already all_gathers
 
-        code_emb_list = torch.tensor([]).type_as(outputs)
+        code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         if not self.args.disable_mlp:
-            mlp_code_list = torch.tensor([]).type_as(outputs)
+            mlp_code_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
 
         for output in outputs:
             code_emb_list = torch.cat((code_emb_list, output["code_embeddings"]), dim=0)
@@ -285,9 +305,9 @@ class MoCoModelPTL(pl.LightningModule):
         world_size = torch.cuda.device_count()
         local_rank = self.global_rank
 
-        docs_emb_list = torch.tensor([]).type_as(outputs)
+        docs_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         if not self.args.disable_mlp:
-            mlp_docs_list = torch.tensor([]).type_as(outputs)
+            mlp_docs_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
 
         for index, output in enumerate(outputs):
             if index%world_size==local_rank:
@@ -295,7 +315,9 @@ class MoCoModelPTL(pl.LightningModule):
                 if not self.args.disable_mlp:
                     mlp_docs_list = torch.cat((mlp_docs_list, output["mlp_docs"]), dim=0)
 
-        labels = torch.tensor([]).type_as(outputs)
+        labels = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
+        
+        # print(f"in validation_epoch_end on {self.global_rank} with dataset doc shape of {outputs[0]['total_size']}")
 
         for index, output in enumerate(outputs):
             if index % world_size == local_rank:
@@ -353,10 +375,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--accelerator", type=str, default="dp")
-    parser.add_argument("--plugins", type=str, default="")
+    parser.add_argument("--plugins", type=str, default=None)
     parser.add_argument("--precision", type=int, default=16)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}")
 
     execute(args)
