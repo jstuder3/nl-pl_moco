@@ -41,7 +41,7 @@ class MoCoModelPTL(pl.LightningModule):
             self.encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
             self.momentum_encoder_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
 
-        self.save_hyperparameters() # we probably don't actually need this, but whatever...
+        self.save_hyperparameters() # makes the hyperparameters available everywhere (but we don't care about that) and automatically logs them to tensorboard
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
@@ -222,6 +222,7 @@ class MoCoModelPTL(pl.LightningModule):
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
         self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        self.log("hp_metric", mrr, on_epoch=True, sync_dist=True)
 
         # [COMPUTE TOP5 AND TOP10 ACCURACY]
         # we can reuse the computation for the MRR
@@ -361,7 +362,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, log_gpu_memory="all", logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
