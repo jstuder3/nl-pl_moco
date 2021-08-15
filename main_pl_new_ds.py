@@ -11,6 +11,9 @@ import numpy as np
 import multiprocessing
 import math
 import platform
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"]="false"
 
 import torch.distributed as dist
 
@@ -29,7 +32,7 @@ class MoCoModelPTL(pl.LightningModule):
         self.batch_size = self.args.batch_size
 
         #self.queue = [] # this causes issues in multi-gpu settings, so we need to replace it with a register_buffer
-        self.register_buffer("queue", torch.randn(self.max_queue_size*self.batch_size, 768)) # queue has dimensions [queue_size*batch_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
+        self.register_buffer("queue", torch.randn(self.max_queue_size*self.batch_size*torch.cuda.device_count(), 768)) # queue has dimensions [queue_size*batch_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
         self.register_buffer("current_index", torch.zeros(1, dtype=torch.long))
         #self.current_index = 0 # for good measure, this is also replaced with a register_buffer
 
@@ -67,8 +70,13 @@ class MoCoModelPTL(pl.LightningModule):
 
         # this function will replace the oldest ("most stale") entry of the queue
         pointer = int(self.current_index)
-        self.queue[pointer : pointer+self.batch_size, :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
-        self.current_index[0] = (self.current_index+self.batch_size) % (self.max_queue_size*self.batch_size) #current_index should point at the beginning of a "block" of size batch_size
+        try:
+            self.queue[pointer : pointer+self.batch_size*torch.cuda.device_count(), :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
+        except:
+            if self.global_rank==0:
+                import IPython
+                IPython.embed()
+        self.current_index[0] = (self.current_index+self.batch_size*torch.cuda.device_count()) % (self.max_queue_size*self.batch_size*torch.cuda.device_count()) #current_index should point at the beginning of a "block" of size batch_size
 
     def concatAllQueueEntries(self):
         #concat_tensor = torch.tensor([]).cuda()
@@ -79,12 +87,12 @@ class MoCoModelPTL(pl.LightningModule):
 
     def concatAllGather(self, tensor):
         gathered_tensors = self.all_gather(tensor)
-        print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and gathered tensor shape of {gathered_tensors.shape}")
+       # print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and gathered tensor shape of {gathered_tensors.shape}")
         #gathered_tensors = torch.cat(gathered_tensors, dim=0)
         cache_tensor = torch.tensor([]).type_as(tensor)
         for elem in gathered_tensors:
             cache_tensor=torch.cat((cache_tensor, torch.squeeze(elem)), dim=0)
-        print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and post-concat cache_tensor shape of {cache_tensor.shape}")
+       # print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and post-concat cache_tensor shape of {cache_tensor.shape}")
         return cache_tensor
        # tensor_list = [tensor.ones_like(tensor) for _ in range(torch.cuda.device_count())]
        # torch.distributed.all_gather(tensor_list, tensor)
@@ -124,8 +132,8 @@ class MoCoModelPTL(pl.LightningModule):
 
         current_batch_size = doc_samples["input_ids"].shape[0]
 
-        print(doc_samples["input_ids"].shape)
-        print(f"In training_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}")
+        # print(doc_samples["input_ids"].shape)
+        # print(f"In training_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}")
 
         # [UPDATE MOMENTUM ENCODER]
         self.update_momentum_encoder()
@@ -176,20 +184,20 @@ class MoCoModelPTL(pl.LightningModule):
 
         loss = nn.CrossEntropyLoss()(logits / self.args.temperature, labels)
 
-        self.log("Loss/training", loss.item())
+        self.log("Loss/training", loss.item(), sync_dist=True)
 
         return loss
 
     def validation_computations(self, docs_list, code_list, labels, base_path_acc, base_path_sim):
 
-        print(f"validation_computations called on {self.global_rank} with shapes: doc_list - {docs_list.shape}, code_list - {code_list.shape}, labels - {labels.shape} and value labels - {labels}")
+        # print(f"validation_computations called on {self.global_rank} with shapes: doc_list - {docs_list.shape}, code_list - {code_list.shape}, labels - {labels.shape} and value labels - {labels}")
 
         # [COMPARE EVERY QUERY WITH EVERY KEY] (expensive, but necessary for full-corpus accuracy estimation; usually you'd only have one query)
 
         # [COMPUTE PAIRWISE COSINE SIMILARITY MATRIX]
         logits = torch.matmul(docs_list, torch.transpose(code_list, 0, 1))  # warning: size grows quadratically in the number of validation samples (4 GB at 20k samples)
 
-        print(f"logits in validation_computations on {self.global_rank} has shape {logits.shape}")
+        # print(f"logits in validation_computations on {self.global_rank} has shape {logits.shape}")
 
         selection = torch.argmax(logits, dim=1)
 
@@ -201,7 +209,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         top_1_accuracy = top_1_correct_guesses / docs_list.shape[0]  # accuracy is the fraction of correct guesses
 
-        self.log_dict({f"{base_path_acc}/top_1": top_1_accuracy * 100, "step": self.current_epoch}, on_epoch=True)
+        self.log_dict({f"{base_path_acc}/top_1": top_1_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
@@ -213,7 +221,7 @@ class MoCoModelPTL(pl.LightningModule):
                           dim=1)  # sum up elements with >= similarity than positive embedding
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
-        self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, )
+        self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # [COMPUTE TOP5 AND TOP10 ACCURACY]
         # we can reuse the computation for the MRR
@@ -222,16 +230,16 @@ class MoCoModelPTL(pl.LightningModule):
 
         top_5_accuracy = top_5_correct_guesses / docs_list.shape[0]
         top_10_accuracy = top_10_correct_guesses / docs_list.shape[0]
-        self.log_dict({f"{base_path_acc}/top_5": top_5_accuracy * 100, "step": self.current_epoch},on_epoch=True)
-        self.log_dict({f"{base_path_acc}/top_10": top_10_accuracy * 100, "step": self.current_epoch}, on_epoch=True)
+        self.log_dict({f"{base_path_acc}/top_5": top_5_accuracy * 100, "step": self.current_epoch},on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_acc}/top_10": top_10_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
         avg_pos_cos_similarity = torch.mean(label_similarities)
-        self.log_dict({f"{base_path_sim}/cosine/positive": avg_pos_cos_similarity, "step": self.current_epoch}, on_epoch=True)
+        self.log_dict({f"{base_path_sim}/cosine/positive": avg_pos_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
         avg_neg_cos_similarity = torch.mean((torch.sum(logits, dim=1) - label_similarities) / (code_list.shape[0] - 1))
-        self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True)
+        self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # free (potentially) a lot of memory
         del label_similarities
@@ -241,17 +249,17 @@ class MoCoModelPTL(pl.LightningModule):
         # this might not work...
         l2_distance_matrix = torch.cdist(docs_list, code_list, p=2)  # input: [val_set_size, 768], [val_set_size, 768]; output: [val_set_size, val_set_size] pairwise l2 distance # (similarly to logits above, this becomes huge very fast)
 
-        print(f"l2_distance_matrix in validation_computation on {self.global_rank} has shape {l2_distance_matrix.shape}")
+        # print(f"l2_distance_matrix in validation_computation on {self.global_rank} has shape {l2_distance_matrix.shape}")
 
         l2_label_list = [l2_distance_matrix[i][int(labels[i].item())].item() for i in range(labels.shape[0])]
         label_distances = torch.tensor(l2_label_list).type_as(docs_list)
 
         avg_pos_l2_distance = torch.mean(label_distances)
-        self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True)
+        self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # like for cosine similarity, compute average of negative similarities
         avg_neg_l2_distance = torch.mean((torch.sum(l2_distance_matrix, dim=1) - label_distances) / (code_list.shape[0] - 1))
-        self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True)
+        self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # for good measure
         del label_distances
@@ -261,7 +269,7 @@ class MoCoModelPTL(pl.LightningModule):
         doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
 
-        print(f"In validation_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}")
+        # print(f"In validation_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}, code_samples[\"input_ids\"] has shape {code_samples['input_ids'].shape}")
 
         with torch.no_grad():
             docs_embeddings, code_embeddings = self(doc_samples, code_samples, isInference=True)
@@ -285,12 +293,13 @@ class MoCoModelPTL(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
 
-        print(f"In validation_epoch_end on {self.global_rank}, outputs[0][\"docs_embeddings\"] has shape {outputs[0]['docs_embeddings'].shape}")
+        # print(f"In validation_epoch_end on {self.global_rank}, outputs[0][\"docs_embeddings\"] has shape {outputs[0]['docs_embeddings'].shape}, outputs[0][\"code_embeddings\"] has shape {outputs[0]['code_embeddings'].shape}")
+        # print(f"outputs in validation_epoch_end on gpu {self.global_rank}: {outputs}")
 
 # to validate in parallel, we need to first obtain the complete code embedding matrix.
         # afterwards, we can compute the pairwise cosine similarity, but just on a subset of the data
 
-        #outputs = self.concatAllGather(outputs) # won't need this because validation_step_end already all_gathers
+        #outputs = self.concatAllGather(outputs) # won't need this because validation_step_end already all_gathers # update: that is a big, fat, stupid lie and cost me like 2 hours lmao
 
         code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         if not self.args.disable_mlp:
@@ -301,6 +310,9 @@ class MoCoModelPTL(pl.LightningModule):
             if not self.args.disable_mlp:
                 mlp_code_list = torch.cat((mlp_code_list, output["mlp_code"]), dim=0)
 
+
+        code_emb_list = self.concatAllGather(code_emb_list)
+        mlp_code_list = self.concatAllGather(mlp_code_list)
         # generate tensor that contains only the "assigned" code embeddings
         world_size = torch.cuda.device_count()
         local_rank = self.global_rank
@@ -310,18 +322,16 @@ class MoCoModelPTL(pl.LightningModule):
             mlp_docs_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
 
         for index, output in enumerate(outputs):
-            if index%world_size==local_rank:
-                docs_emb_list = torch.cat((docs_emb_list, output["docs_embeddings"]), dim=0)
-                if not self.args.disable_mlp:
-                    mlp_docs_list = torch.cat((mlp_docs_list, output["mlp_docs"]), dim=0)
+            docs_emb_list = torch.cat((docs_emb_list, output["docs_embeddings"]), dim=0)
+            if not self.args.disable_mlp:
+                mlp_docs_list = torch.cat((mlp_docs_list, output["mlp_docs"]), dim=0)
 
         labels = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         
         # print(f"in validation_epoch_end on {self.global_rank} with dataset doc shape of {outputs[0]['total_size']}")
 
         for index, output in enumerate(outputs):
-            if index % world_size == local_rank:
-                labels=torch.cat((labels, output["index"]), dim=0)
+            labels=torch.cat((labels, output["index"]), dim=0)
 
         # assert (docs_emb_list.shape == code_emb_list.shape)
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
@@ -351,7 +361,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, log_gpu_memory="all", logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
