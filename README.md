@@ -17,7 +17,7 @@ To download this using command line, do the following:
 
 There are many flags, some for hyperparameters and some for debugging:
 
-    --model_name: huggingface model path (needs 512 input and 768 embedding size)
+    --model_name: huggingface model path (needs to have 768 embedding size)
     --num_epochs: number of epochs to train for
     --batch_size: batch size per GPU
     --learning_rate: learning rate
@@ -31,7 +31,7 @@ There are many flags, some for hyperparameters and some for debugging:
     --base_data_folder: folder that contains the cleaned CodeSearchNet dataset
     --debug_data_skip_interval: take only every i-th entry of the train/val dataset to decrease amount of data used
     --always_use_full_val: ignores the debug_data_skip_interval flag for the validation set
-    --seed: seed used for randomized operations such as MLP initialization or augmentation (needed to get correct results on multi-GPU training where every GPU has its own copy of the model)
+    --seed: seed used for randomized operations such as MLP initialization or EDA augmentation (needed to get correct results on multi-GPU training where every GPU has its own copy of the model)
     --accelerator: PyTorch Lightning accelerator to use
     --plugins: PyTorch Lightning plugins to use
     --precision: floating point precision to use
@@ -40,4 +40,4 @@ An example command can be seen below:
 
     python main_pl_new_ds.py --augment --shuffle --debug_data_skip_interval=1 --max_queue_size=128 --batch_size=16 --base_data_folder="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet" --accelerator="ddp"
     
-Note: For correct results, it is necessary that max_queue_size < len(train_loader) / num_gpus. For example, if you use --debug_data_skip_interval=1, we use the full 252k training samples for Python, so len(train_loader) = 252k / batch_size. Since the amount of data per queue entry varies depending on the batch_size and number of GPUs used, this effectively means that max_queue_size < 252k / (debug_data_skip_interval * batch_size * num_gpus) must hold.
+Note: For correct results, it is necessary that max_queue_size < len(train_loader) / num_gpus. For example, if you use --debug_data_skip_interval=1, the full 252k training samples for Python are fed to the model in every epoch, so len(train_loader) = 252k / batch_size. Since the amount of data per queue entry varies depending on the batch_size and number of GPUs used, this effectively means that max_queue_size < 252k / (debug_data_skip_interval * batch_size * num_gpus) must hold.
