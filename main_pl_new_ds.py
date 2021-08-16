@@ -50,6 +50,8 @@ class MoCoModelPTL(pl.LightningModule):
 
     def train_dataloader(self):
         train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        assert self.max_queue_size<(len(train_loader)/self.num_gpus), f"Assertion error: Queue size {self.max_queue_size} is too large. The same batche might be contained multiple times in the queue. Plese increase amount of data, decrease batch size or numbers of gpus or decrease queue size for correct learning behaviour. (current len(train_loader)={len(train_loader)} and num_gpus={self.num_gpus}, which makes for a maximum allowed queue size of {len(train_loader)/self.num_gpus})"
+
         return train_loader
 
     def val_dataloader(self):
@@ -205,6 +207,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         top_1_accuracy = top_1_correct_guesses / docs_list.shape[0]  # accuracy is the fraction of correct guesses
 
+        print(f"Validation {substring} top_1 accuracy (on gpu {self.global_rank}): {top_1_accuracy * 100:.3f}%")
         self.log_dict({f"{base_path_acc}/top_1": top_1_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
@@ -217,6 +220,7 @@ class MoCoModelPTL(pl.LightningModule):
                           dim=1)  # sum up elements with >= similarity than positive embedding
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
+        print(f"Validation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
         self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
         if base_path_acc=="Accuracy_enc/validation":
             self.log("hp_metric", mrr, on_epoch=True, sync_dist=True)
@@ -228,15 +232,20 @@ class MoCoModelPTL(pl.LightningModule):
 
         top_5_accuracy = top_5_correct_guesses / docs_list.shape[0]
         top_10_accuracy = top_10_correct_guesses / docs_list.shape[0]
+
+        print(f"Validation {substring} top_5 accuracy (on gpu {self.global_rank}): {top_5_accuracy * 100:.3f}%")
+        print(f"Validation {substring} top_10 accuracy (on gpu {self.global_rank}): {top_10_accuracy * 100:.3f}%")
         self.log_dict({f"{base_path_acc}/top_5": top_5_accuracy * 100, "step": self.current_epoch},on_epoch=True, sync_dist=True)
         self.log_dict({f"{base_path_acc}/top_10": top_10_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
         avg_pos_cos_similarity = torch.mean(label_similarities)
+        print(f"Validation {substring} avg_pos_cos_similarity (on gpu {self.global_rank}): {avg_pos_cos_similarity:.6f}")
         self.log_dict({f"{base_path_sim}/cosine/positive": avg_pos_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
         avg_neg_cos_similarity = torch.mean((torch.sum(logits, dim=1) - label_similarities) / (code_list.shape[0] - 1))
+        print(f"Validation {substring} avg_neg_cos_similarity (on gpu {self.global_rank}): {avg_neg_cos_similarity:.6f}")
         self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # free (potentially) a lot of memory
@@ -253,25 +262,18 @@ class MoCoModelPTL(pl.LightningModule):
         label_distances = torch.tensor(l2_label_list).type_as(docs_list)
 
         avg_pos_l2_distance = torch.mean(label_distances)
+        print(f"Validation {substring} avg_pos_l2_distance (on gpu {self.global_rank}): {avg_pos_l2_distance:.6f}")
         self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # like for cosine similarity, compute average of negative similarities
         avg_neg_l2_distance = torch.mean((torch.sum(l2_distance_matrix, dim=1) - label_distances) / (code_list.shape[0] - 1))
+        print(f"Validation {substring} avg_neg_l2_distance (on gpu {self.global_rank}): {avg_neg_l2_distance:.6f}")
         self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # for good measure
         del label_distances
         del l2_distance_matrix
 
-        if True:#self.global_rank==0: # only print from gpu 0 to keep some order in the output
-            print(f"Validation {substring} top_1 accuracy (on gpu {self.global_rank}): {top_1_accuracy * 100:.3f}%")
-            print(f"Validation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
-            print(f"Validation {substring} top_5 accuracy (on gpu {self.global_rank}): {top_5_accuracy * 100:.3f}%")
-            print(f"Validation {substring} top_10 accuracy (on gpu {self.global_rank}): {top_10_accuracy * 100:.3f}%")
-            print(f"Validation {substring} avg_pos_cos_similarity (on gpu {self.global_rank}): {avg_pos_cos_similarity:.6f}")
-            print(f"Validation {substring} avg_neg_cos_similarity (on gpu {self.global_rank}): {avg_neg_cos_similarity:.6f}")
-            print(f"Validation {substring} avg_pos_l2_distance (on gpu {self.global_rank}): {avg_pos_l2_distance:.6f}")
-            print(f"Validation {substring} avg_neg_l2_distance (on gpu {self.global_rank}): {avg_neg_l2_distance:.6f}")
 
 
     def validation_step(self, batch, batch_idx):
@@ -369,6 +371,9 @@ def execute(args):
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-learning_rate_{args.learning_rate}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
     trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+
+
+#    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, plugins="deepspeed", precision=args.precision)
 
     trainer.fit(model)
 
