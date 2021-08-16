@@ -30,6 +30,7 @@ class MoCoModelPTL(pl.LightningModule):
         self.max_queue_size = self.args.max_queue_size
         self.update_weight = self.args.momentum_update_weight
         self.batch_size = self.args.batch_size
+        self.num_gpus = torch.cuda.device_count()
 
         #self.queue = [] # this causes issues in multi-gpu settings, so we need to replace it with a register_buffer
         self.register_buffer("queue", torch.randn(self.max_queue_size*self.batch_size*torch.cuda.device_count(), 768)) # queue has dimensions [queue_size*batch_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
@@ -70,12 +71,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         # this function will replace the oldest ("most stale") entry of the queue
         pointer = int(self.current_index)
-        try:
-            self.queue[pointer : pointer+self.batch_size*torch.cuda.device_count(), :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
-        except:
-            if self.global_rank==0:
-                import IPython
-                IPython.embed()
+        self.queue[pointer : pointer+self.batch_size*torch.cuda.device_count(), :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
         self.current_index[0] = (self.current_index+self.batch_size*torch.cuda.device_count()) % (self.max_queue_size*self.batch_size*torch.cuda.device_count()) #current_index should point at the beginning of a "block" of size batch_size
 
     def concatAllQueueEntries(self):
@@ -188,7 +184,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         return loss
 
-    def validation_computations(self, docs_list, code_list, labels, base_path_acc, base_path_sim):
+    def validation_computations(self, docs_list, code_list, labels, base_path_acc, base_path_sim, substring=""):
 
         # print(f"validation_computations called on {self.global_rank} with shapes: doc_list - {docs_list.shape}, code_list - {code_list.shape}, labels - {labels.shape} and value labels - {labels}")
 
@@ -222,7 +218,8 @@ class MoCoModelPTL(pl.LightningModule):
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
 
         self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
-        self.log("hp_metric", mrr, on_epoch=True, sync_dist=True)
+        if base_path_acc=="Accuracy_enc/validation":
+            self.log("hp_metric", mrr, on_epoch=True, sync_dist=True)
 
         # [COMPUTE TOP5 AND TOP10 ACCURACY]
         # we can reuse the computation for the MRR
@@ -265,6 +262,17 @@ class MoCoModelPTL(pl.LightningModule):
         # for good measure
         del label_distances
         del l2_distance_matrix
+
+        if True:#self.global_rank==0: # only print from gpu 0 to keep some order in the output
+            print(f"Validation {substring} top_1 accuracy (on gpu {self.global_rank}): {top_1_accuracy * 100:.3f}%")
+            print(f"Validation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
+            print(f"Validation {substring} top_5 accuracy (on gpu {self.global_rank}): {top_5_accuracy * 100:.3f}%")
+            print(f"Validation {substring} top_10 accuracy (on gpu {self.global_rank}): {top_10_accuracy * 100:.3f}%")
+            print(f"Validation {substring} avg_pos_cos_similarity (on gpu {self.global_rank}): {avg_pos_cos_similarity:.6f}")
+            print(f"Validation {substring} avg_neg_cos_similarity (on gpu {self.global_rank}): {avg_neg_cos_similarity:.6f}")
+            print(f"Validation {substring} avg_pos_l2_distance (on gpu {self.global_rank}): {avg_pos_l2_distance:.6f}")
+            print(f"Validation {substring} avg_neg_l2_distance (on gpu {self.global_rank}): {avg_neg_l2_distance:.6f}")
+
 
     def validation_step(self, batch, batch_idx):
         doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
@@ -311,7 +319,6 @@ class MoCoModelPTL(pl.LightningModule):
             if not self.args.disable_mlp:
                 mlp_code_list = torch.cat((mlp_code_list, output["mlp_code"]), dim=0)
 
-
         code_emb_list = self.concatAllGather(code_emb_list)
         mlp_code_list = self.concatAllGather(mlp_code_list)
         # generate tensor that contains only the "assigned" code embeddings
@@ -327,21 +334,20 @@ class MoCoModelPTL(pl.LightningModule):
             if not self.args.disable_mlp:
                 mlp_docs_list = torch.cat((mlp_docs_list, output["mlp_docs"]), dim=0)
 
-        labels = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
+        basis_index = docs_emb_list.shape[0]
+        labels = torch.tensor([x for x in range(basis_index*local_rank, basis_index*(local_rank+1))]).type_as(outputs[0]["docs_embeddings"])
         
         # print(f"in validation_epoch_end on {self.global_rank} with dataset doc shape of {outputs[0]['total_size']}")
 
-        for index, output in enumerate(outputs):
-            labels=torch.cat((labels, output["index"]), dim=0)
 
         # assert (docs_emb_list.shape == code_emb_list.shape)
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
-        self.validation_computations(docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc")
+        self.validation_computations(docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
 
         if not self.args.disable_mlp:
             # assert (mlp_docs_list.shape == mlp_code_list.shape)
             assert (mlp_docs_list.shape[1] == 128)  # MLP embeddings are 128-dimensional
-            self.validation_computations(mlp_docs_list, mlp_code_list, labels, "Accuracy_MLP/validation", "Similarity_MLP")
+            self.validation_computations(mlp_docs_list, mlp_code_list, labels, "Accuracy_MLP/validation", "Similarity_MLP", substring="MLP")
 
 # COPIED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/codesearch/run_classifier.py#L45
 def set_seed(seed):
@@ -360,7 +366,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-learning_rate_{args.learning_rate}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
 
     trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
