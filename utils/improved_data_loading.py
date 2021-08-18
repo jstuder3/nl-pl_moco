@@ -159,7 +159,7 @@ def generateDataLoader(language, split, tokenizer, args, batch_size=1, shuffle=F
     # source: code; target: nl
     data = CodeSearchNetDataset({"input_ids": all_target_ids, "attention_mask": all_target_mask}, {"input_ids": all_source_ids, "attention_mask": all_source_mask})
 
-    dataloader = DataLoader(data, batch_size=args.batch_size, drop_last=True, shuffle=shuffle, num_workers=num_workers)
+    dataloader = DataLoader(data, batch_size=batch_size, drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
     return dataloader
 

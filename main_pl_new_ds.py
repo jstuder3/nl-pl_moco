@@ -23,7 +23,7 @@ class MoCoModelPTL(pl.LightningModule):
 
         self.effective_queue_size = self.args.effective_queue_size
         self.update_weight = self.args.momentum_update_weight
-        self.batch_size = self.args.batch_size
+        self.batch_size = self.args.effective_batch_size
         self.num_gpus = args.num_gpus
 
         self.register_buffer("queue", torch.randn(self.effective_queue_size, 768)) # queue has dimensions [queue_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
@@ -42,13 +42,13 @@ class MoCoModelPTL(pl.LightningModule):
 
     def train_dataloader(self):
         # the train_loader contains the batches for each GPU, so the batch size for it is the effective batch size divided by the number of gpus
-        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=self.args.batch_size/self.args.num_gpus, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
-        assert self.effective_queue_size<((len(train_loader)*(self.batch_size/self.args.num_gpus))), f"Assertion error: Queue size {self.effective_queue_size} is too large. The same batche might be contained multiple times in the queue. Plese increase amount of data or decrease queue size for correct learning behaviour. (current number of samples: {len(train_loader)*(self.batch_size/self.args.num_gpus)})"
+        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        assert self.effective_queue_size<((len(train_loader)*(self.batch_size/self.args.num_gpus))), f"Assertion error: Queue size {self.effective_queue_size} is too large. The same batche might be contained multiple times in the queue. Plese increase amount of data or decrease queue size for correct learning behaviour. (current number of samples: {len(train_loader)*int((self.batch_size/self.num_gpus))})"
 
         return train_loader
 
     def val_dataloader(self):
-        val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=False, augment=False, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return val_loader
 
     def update_momentum_encoder(self):
@@ -346,7 +346,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-effective_bs_{args.effective_batch_size}-lr_{args.learning_rate}-effective_queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{args.num_gpus}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-effective_bs_{args.effective_batch_size}-lr_{args.learning_rate}-effective_queue_size_{args.effective_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{args.num_gpus}")
 
     trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
