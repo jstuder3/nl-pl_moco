@@ -9,7 +9,7 @@ from datetime import datetime
 import numpy as np
 import os
 
-os.environ["TOKENIZERS_PARALLELISM"]="false"
+#os.environ["TOKENIZERS_PARALLELISM"]="false"
 
 from utils.improved_data_loading import generateDataLoader
 
@@ -17,7 +17,7 @@ class MoCoModelPTL(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.tokenizer = AutoTokenizer.from_pretrained(self.args.model_name)
+        self.tokenizer = None # AutoTokenizer.from_pretrained(self.args.model_name)
         self.encoder = AutoModel.from_pretrained(self.args.model_name)
         self.momentum_encoder = AutoModel.from_pretrained(self.args.model_name)
 
@@ -42,11 +42,15 @@ class MoCoModelPTL(pl.LightningModule):
         return optimizer
 
     def train_dataloader(self):
+        if self.tokenizer==None:
+            self.tokenizer=AutoTokenizerfrom_pretrained(self.args.model_name)
         # the train_loader contains the batches for each GPU, so the batch size for it is the effective batch size divided by the number of gpus
         train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return train_loader
 
     def val_dataloader(self):
+        if self.tokenizer==None:
+            self.tokenizer=AutoTokenizer.from_pretrained(self.args.model_name)
         val_loader = generateDataLoader("python", "valid", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=False, augment=False, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return val_loader
 

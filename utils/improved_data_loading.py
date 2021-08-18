@@ -35,7 +35,7 @@ def read_examples(filename, args, ignore_debug=False): #ignore_debug can be used
         for idx, line in enumerate(f):
 
             if (ignore_debug) or (idx%args.debug_data_skip_interval==0):
-                if counter%100==0:
+                if counter%10000==0:
                     sys.stdout.write(f"\rData loading process: {idx}")
                     sys.stdout.flush()
                 counter += 1
@@ -82,7 +82,7 @@ def convert_examples_to_features(examples, tokenizer, stage=None):
     features = []
     counter=0
     for example_index, example in enumerate(examples):
-        if counter % 100 == 0 and counter!=0:
+        if counter % 10000 == 0 and counter!=0:
             sys.stdout.write(f"\rTokenization process: {counter}/{len(examples)} ({counter/len(examples)*100:.1f}%)")
             sys.stdout.flush()
         counter+=1
@@ -132,7 +132,7 @@ def generateDataLoader(language, split, tokenizer, args, batch_size=1, shuffle=F
 
     if augment:
         for i in range(len(examples)):
-            if i % 100 == 0:
+            if i % 10000 == 0:
                 sys.stdout.write(
                     f"\rAugmentation process: {i}/{len(examples)} ({i / len(examples) * 100:.1f}%)")
                 sys.stdout.flush()
