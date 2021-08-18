@@ -1,5 +1,3 @@
-# LOTS OF DEBUGGING STUFF BECAUSE I WANT TO GET DEEPSPEED TO WORK FIRST! THIS IS BY NO MEANS WHAT xMoCo SHOULD LOOK LIKE!
-
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -22,17 +20,31 @@ class xMoCoModelPTL(pl.LightningModule):
         self.code_tokenizer = None
 
         self.docs_fast_encoder = AutoModel.from_pretrained(args.docs_encoder)
-        #self.docs_slow_encoder = AutoModel.from_pretrained(args.docs_encoder)
-        #self.code_fast_encoder = AutoModel.from_pretrained(args.code_encoder)
-        #self.code_slow_encoder = AutoModel.from_pretrained(args.code_encoder)
+        self.docs_slow_encoder = AutoModel.from_pretrained(args.docs_encoder)
+        self.code_fast_encoder = AutoModel.from_pretrained(args.code_encoder)
+        self.code_slow_encoder = AutoModel.from_pretrained(args.code_encoder)
 
-        self.effective_queue_size = self.args.effective_queue_size
-        self.update_weight = self.args.momentum_update_weight
-        self.batch_size = self.args.effective_batch_size
+        self.effective_queue_size = args.effective_queue_size
+        self.update_weight = args.momentum_update_weight
+        self.batch_size = args.effective_batch_size
+        self.temperature = args.temperature
         self.num_gpus = args.num_gpus
 
-        # debug: remove later
-        self.register_buffer("queue", torch.randn(int(self.batch_size/self.num_gpus), 768))
+        # queues
+        self.register_buffer("docs_queue", torch.randn(self.effective_queue_size, 768))
+        self.register_buffer("code_queue", torch.randn(self.effective_queue_size, 768))
+
+        # we actually only need one indices and current_index storage buffer, but that would make the replaceOldestQueueEntry implementation a bit nasty. Since these aren't big, I'll just keep it :P
+
+        # dataset indices of the samples in the queues
+        self.register_buffer("docs_indices", torch.empty(self.effective_queue_size).fill_(-1))
+        self.register_buffer("code_indices", torch.empty(self.effective_queue_size).fill_(-1))
+
+        # pointers to the starting index of the next block to be replaced
+        self.register_buffer("docs_current_index", torch.zeros(1, dtype=torch.long))
+        self.register_buffer("code_current_index", torch.zeros(1, dtype=torch.long))
+
+        self.save_hyperparameters()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
@@ -60,47 +72,130 @@ class xMoCoModelPTL(pl.LightningModule):
     @torch.no_grad()
     def updateMomentumEncoder(self, fast_encoder, slow_encoder):
         """Momentum update of the key encoder."""
-        for param_fast, param_slow in zip(self.fast_encoder.parameters(), self.slow_encoder.parameters()):
+        for param_fast, param_slow in zip(fast_encoder.parameters(), slow_encoder.parameters()):
             em = self.update_weight
             param_slow.data = param_slow.data * em + param_fast.data * (1.0 - em)
 
-    def forward(self, docs_samples, code_samples):
-        # debug: change later
-        out1=self.docs_fast_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
+    def replaceOldestQueueEntry(self, queue, queue_indices, current_index, newEntry, newIndices):
+
+        gatheredNewEntries = self.concatAllGather(newEntry)
+        gatheredNewIndices = self.concatAllGather(newIndices)
+
+        pointer = int(current_index)
+        queue[pointer : pointer+self.batch_size, :] = gatheredNewEntries.detach() # the queue doesn't need the computational graph
+        queue_indices[pointer : pointer+self.batch_size] = gatheredNewIndices
+        current_index[0] = (pointer + self.batch_size) % self.effective_queue_size
+
+    def concatAllGather(self, tensor):
+        if args.accelerator=="dp":
+            return tensor
+        gathered_tensors = self.all_gather(tensor)
+        cache_tensor = torch.tensor([]).type_as(tensor)
+        for elem in gathered_tensors:
+            cache_tensor=torch.cat((cache_tensor, torch.squeeze(elem)), dim=0)
+        return cache_tensor
+
+    def forward(self, docs_samples, code_samples, isInference=False):
+        if not isInference:
+            docs_embeddings = self.docs_fast_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
+            code_embeddings = self.code_fast_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
+        else:
+            with torch.no_grad():
+                docs_embeddings = self.docs_fast_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
+                code_embeddings = self.code_fast_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
+        return docs_embeddings, code_embeddings
+
+    def slow_forward(self, docs_samples, code_samples):
         with torch.no_grad():
-            out2=self.docs_fast_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
-        return out1, out2
+            slow_docs_embeddings = self.docs_slow_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
+            slow_code_embeddings = self.code_slow_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
+        return slow_docs_embeddings, slow_code_embeddings
 
     def training_step(self, batch, batch_idx):
-        # debug: change later
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
         batch_indices = batch["index"]
 
         current_batch_size = docs_samples["input_ids"].shape[0]
 
-        docs_embeddings, code_embeddings = self.forward(docs_samples, code_samples) # after deepspeed tests: make this return everything, including the slow_encoder embeddings
+        # [UPDATE MOMENTUM ENCODERS]
+        self.updateMomentumEncoder(self.docs_fast_encoder, self.docs_slow_encoder)
+        self.updateMomentumEncoder(self.code_fast_encoder, self.code_slow_encoder)
+
+        # [FORWARD PASS] (compute embeddings using the fast encoders)
+        docs_embeddings, code_embeddings = self(docs_samples, code_samples)
+        positive_slow_docs_embeddings, positive_slow_code_embeddings = self.slow_forward(docs_samples, code_samples)
 
         docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
         code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
+        positive_slow_docs_embeddings = F.normalize(positive_slow_docs_embeddings, p=2, dim=1)
+        positive_slow_code_embeddings = F.normalize(positive_slow_code_embeddings, p=2, dim=1)
 
-        l_pos = torch.bmm(docs_embeddings.view((current_batch_size, 1, -1)), code_embeddings.view((current_batch_size, -1, 1)))
+        # [COMPUTE LOSS]
 
-        if code_embeddings.shape[0] != 0:
-            # compute similarity of negative NL/PL pairs and concatenate with l_pos to get logits
-            l_neg = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.queue, 0, 1))
-            logits = torch.cat((l_pos.view((current_batch_size, 1)), l_neg), dim=1)
+        # compute similarity of positive fast_NL/slow_PL pairs
+        l_pos_nl_pl = torch.bmm(docs_embeddings.view((current_batch_size, 1, -1)), positive_slow_code_embeddings.view((current_batch_size, -1, 1)))
+        l_pos_pl_nl = torch.bmm(code_embeddings.view((current_batch_size, 1, -1)), positive_slow_docs_embeddings.view((current_batch_size, -1, 1)))
 
-        labels = torch.tensor([0 for h in range(code_embeddings.shape[0])]).type_as(code_samples["input_ids"])
+        l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
+        l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
 
-        loss = nn.CrossEntropyLoss()(logits / self.args.temperature, labels)
+        logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
+        logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
 
-        self.queue[:] = code_embeddings.detach()
+        # remove/mask out any logits entry for which the queue contained a duplicate
+        inclusion_list = torch.tensor([index for index, x in enumerate(batch_indices) if x not in self.code_indices]).type_as(logits_nl_pl).long()
+        logits_nl_pl=logits_nl_pl[inclusion_list]
+        logits_pl_nl=logits_pl_nl[inclusion_list]
+
+        # labels: the entries from l_pos should always contain the smallest values
+        labels = torch.tensor([0 for _ in range(len(inclusion_list))]).type_as(code_samples["input_ids"])
+        loss_nl_pl = nn.CrossEntropyLoss()(logits_nl_pl/self.temperature, labels)
+        loss_pl_nl = nn.CrossEntropyLoss()(logits_pl_nl/self.temperature, labels)
+
+        loss = (loss_nl_pl + loss_pl_nl) / 2
+
+        self.log("Loss/training", loss.item(), sync_dist=True)
+
+        # [UPDATE THE QUEUES]
+        #negative_slow_docs_embeddings, negative_slow_code_embeddings = self.slow_forward(docs_samples, code_samples)
+        self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices)
+        self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices)
 
         return loss
 
     def validation_step(self, batch, batch_idx):
-        pass
+        docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
+        code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
+
+        docs_embeddings, code_embeddings = self(docs_samples, code_samples, isInference=True)
+
+        docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
+        code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
+
+        return {"index": batch["index"].view(-1), "docs_embeddings": docs_embeddings, "code_embeddings": code_embeddings}
+
+    def validation_step_end(self, batch_parts): # I know this seems unnecessary at first glance, but the original function would only return the very first entry of every tensor in the dictionary. But we need all entries
+        return batch_parts
+
+    def validation_epoch_end(self, outputs):
+        code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
+        docs_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
+
+        for output in outputs:
+            code_emb_list = torch.cat((code_emb_list, output["code_embeddings"]), dim=0)
+            docs_emb_list = torch.cat((docs_emb_list, output["docs_embeddings"]), dim=0)
+
+        code_emb_list = self.concatAllGather(code_emb_list)
+
+        local_rank = self.global_rank
+
+        basis_index = docs_emb_list.shape[0]
+        # labels are on a "shifted" diagonal
+        labels = torch.tensor([x for x in range(basis_index * local_rank, basis_index * (local_rank + 1))]).type_as(outputs[0]["docs_embeddings"])
+
+        assert (docs_emb_list.shape[1] == 768)
+        validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
 
 # COPIED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/codesearch/run_classifier.py#L45
 def set_seed(seed):
@@ -130,7 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--docs_encoder", type=str, default="microsoft/codebert-base")
     parser.add_argument("--code_encoder", type=str, default="microsoft/codebert-base")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--effective_batch_size", type=int, default=2)
+    parser.add_argument("--effective_batch_size", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--effective_queue_size", type=int, default=64)
@@ -151,4 +246,3 @@ if __name__ == "__main__":
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}")
 
     execute(args)
-

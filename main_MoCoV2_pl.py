@@ -24,6 +24,7 @@ class MoCoModelPTL(pl.LightningModule):
         self.num_gpus = args.num_gpus
 
         self.register_buffer("queue", torch.randn(self.effective_queue_size, 768)) # queue has dimensions [queue_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
+        self.queue=F.normalize(self.queue, p=2, dim=1)
         self.register_buffer("queue_indices", torch.empty(self.effective_queue_size).fill_(-1))
         self.register_buffer("current_index", torch.zeros(1, dtype=torch.long))
 
@@ -267,7 +268,6 @@ class MoCoModelPTL(pl.LightningModule):
         self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
         self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
         self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
-
 
     def validation_step(self, batch, batch_idx):
         doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
