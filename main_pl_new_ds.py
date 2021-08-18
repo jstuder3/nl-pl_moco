@@ -141,7 +141,7 @@ class MoCoModelPTL(pl.LightningModule):
         # compute outputs of finetuned CodeBERT encoder and momentum encoder
         encoder_embeddings, positive_momentum_encoder_embeddings = self(doc_samples, code_samples)
 
-        if self.args.normalize_encoder_embeddings_during_training and (not self.args.disable_mlp):  # if the mlp is disabled, we would normalize twice, so we can skip this block
+        if not self.args.disable_normalizing_encoder_embeddings_during_training and (not self.args.disable_mlp):  # if the mlp is disabled, we would normalize twice, so we can skip this block
             encoder_embeddings = F.normalize(encoder_embeddings, p=2, dim=1)
             positive_momentum_encoder_embeddings = F.normalize(positive_momentum_encoder_embeddings, p=2, dim=1)
 
@@ -389,8 +389,8 @@ if __name__ == "__main__":
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", action="store_true", default=False)
     parser.add_argument("--augment", action="store_true", default=False)
-    parser.add_argument("--normalize_encoder_embeddings_during_training", type=bool, default=True) #always on for now
-    parser.add_argument("--disable_mlp", action="store_true", default=False)
+    parser.add_argument("--disable_normalizing_encoder_embeddings_during_training", action="store_true", default=False) # used for some experiments. disabling normalization of the encoder embeddings during training will destroy performance!
+    parser.add_argument("--disable_mlp", action="store_true", default=False) # this is a bad idea and will probably lower the performance. super unintuitive though.
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=400) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
@@ -401,6 +401,6 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=int, default=16)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_normalizing_encoder_embeddings_during_training={args.disable_normalizing_encoder_embeddings_during_training}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}")
 
     execute(args)
