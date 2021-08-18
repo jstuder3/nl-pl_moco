@@ -32,7 +32,7 @@ class xMoCoModelPTL(pl.LightningModule):
         self.num_gpus = args.num_gpus
 
         # debug: remove later
-        self.register_buffer("queue", torch.randn(self.batch_size, 768))
+        self.register_buffer("queue", torch.randn(int(self.batch_size/self.num_gpus), 768))
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
@@ -67,7 +67,8 @@ class xMoCoModelPTL(pl.LightningModule):
     def forward(self, docs_samples, code_samples):
         # debug: change later
         out1=self.docs_fast_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
-        out2=self.docs_fast_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
+        with torch.no_grad():
+            out2=self.docs_fast_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return out1, out2
 
     def training_step(self, batch, batch_idx):
