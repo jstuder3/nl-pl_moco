@@ -6,16 +6,10 @@ import pytorch_lightning as pl
 import argparse
 import random
 from datetime import datetime
-import time
 import numpy as np
-import multiprocessing
-import math
-import platform
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"]="false"
-
-import torch.distributed as dist
 
 from utils.improved_data_loading import generateDataLoader
 
@@ -27,15 +21,13 @@ class MoCoModelPTL(pl.LightningModule):
         self.encoder = AutoModel.from_pretrained(self.args.model_name)
         self.momentum_encoder = AutoModel.from_pretrained(self.args.model_name)
 
-        self.max_queue_size = self.args.max_queue_size
+        self.effective_queue_size = self.args.effective_queue_size
         self.update_weight = self.args.momentum_update_weight
         self.batch_size = self.args.batch_size
-        self.num_gpus = torch.cuda.device_count()
+        self.num_gpus = args.num_gpus
 
-        #self.queue = [] # this causes issues in multi-gpu settings, so we need to replace it with a register_buffer
-        self.register_buffer("queue", torch.randn(self.max_queue_size*self.batch_size*torch.cuda.device_count(), 768)) # queue has dimensions [queue_size*batch_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
+        self.register_buffer("queue", torch.randn(self.effective_queue_size, 768)) # queue has dimensions [queue_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
         self.register_buffer("current_index", torch.zeros(1, dtype=torch.long))
-        #self.current_index = 0 # for good measure, this is also replaced with a register_buffer
 
         if not self.args.disable_mlp:
             # 768 is output size of CodeBERT (i.e. BERT_base), 2048 is the hidden layer size MoCoV2 uses and 128 is the output size that SimCLR uses
@@ -49,8 +41,9 @@ class MoCoModelPTL(pl.LightningModule):
         return optimizer
 
     def train_dataloader(self):
-        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
-        assert self.max_queue_size<(len(train_loader)/self.num_gpus), f"Assertion error: Queue size {self.max_queue_size} is too large. The same batche might be contained multiple times in the queue. Plese increase amount of data, decrease batch size or numbers of gpus or decrease queue size for correct learning behaviour. (current len(train_loader)={len(train_loader)} and num_gpus={self.num_gpus}, which makes for a maximum allowed queue size of {len(train_loader)/self.num_gpus})"
+        # the train_loader contains the batches for each GPU, so the batch size for it is the effective batch size divided by the number of gpus
+        train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=self.args.batch_size/self.args.num_gpus, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        assert self.effective_queue_size<((len(train_loader)*(self.batch_size/self.args.num_gpus))), f"Assertion error: Queue size {self.effective_queue_size} is too large. The same batche might be contained multiple times in the queue. Plese increase amount of data or decrease queue size for correct learning behaviour. (current number of samples: {len(train_loader)*(self.batch_size/self.args.num_gpus)})"
 
         return train_loader
 
@@ -69,33 +62,23 @@ class MoCoModelPTL(pl.LightningModule):
 
         # DIFFERENCE TO SINGLE-GPU IMPLEMENTATION: NEED TO GATHER THE CODE EMBEDDINGS OF ALL OTHER GPUS OF THIS ITERATION
 
-        gatheredNewEntries = self.concatAllGather(newEntry) # this could be problematic; need to check that this returns a tenosr of shape [batch_size, 768] instead of [batch_size/num_gpus, 768]
+        gatheredNewEntries = self.concatAllGather(newEntry)
 
         # this function will replace the oldest ("most stale") entry of the queue
         pointer = int(self.current_index)
-        self.queue[pointer : pointer+self.batch_size*torch.cuda.device_count(), :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
-        self.current_index[0] = (self.current_index+self.batch_size*torch.cuda.device_count()) % (self.max_queue_size*self.batch_size*torch.cuda.device_count()) #current_index should point at the beginning of a "block" of size batch_size
+        self.queue[pointer : pointer+self.batch_size, :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
+        self.current_index[0] = (self.current_index+self.batch_size) % self.effective_queue_size #current_index should point at the beginning of a "block" of size batch_size
 
     def concatAllQueueEntries(self):
-        #concat_tensor = torch.tensor([]).cuda()
-        #for queue_entry in self.queue:
-        #    concat_tensor = torch.cat((concat_tensor, queue_entry), dim=0)
         return self.queue # the register_buffer version is already concatenated
-        #return concat_tensor
 
     def concatAllGather(self, tensor):
         gathered_tensors = self.all_gather(tensor)
-       # print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and gathered tensor shape of {gathered_tensors.shape}")
-        #gathered_tensors = torch.cat(gathered_tensors, dim=0)
         cache_tensor = torch.tensor([]).type_as(tensor)
         for elem in gathered_tensors:
             cache_tensor=torch.cat((cache_tensor, torch.squeeze(elem)), dim=0)
        # print(f"concatAllGather called on {self.global_rank} with tensor of shape {tensor.shape} and post-concat cache_tensor shape of {cache_tensor.shape}")
         return cache_tensor
-       # tensor_list = [tensor.ones_like(tensor) for _ in range(torch.cuda.device_count())]
-       # torch.distributed.all_gather(tensor_list, tensor)
-       # tensors_gather = torch.cat(tensor_list, dim=0)
-       # return tensors_gather
 
     def forward(self, encoder_input, momentum_encoder_input, isInference=False):
         # note entirely sure but I think I may only need the "pooler_output" [bs, 768] and not the "last_hidden_state" [bs, 512, 768]
@@ -204,11 +187,7 @@ class MoCoModelPTL(pl.LightningModule):
         # diagonal_label_tensor = torch.tensor([x for x in range(docs_list.shape[0])]).to(device)
 
         top_1_correct_guesses = torch.sum(selection == labels)
-
         top_1_accuracy = top_1_correct_guesses / docs_list.shape[0]  # accuracy is the fraction of correct guesses
-
-        print(f"Validation {substring} top_1 accuracy (on gpu {self.global_rank}): {top_1_accuracy * 100:.3f}%")
-        self.log_dict({f"{base_path_acc}/top_1": top_1_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # [COMPUTE MEAN RECIPROCAL RANK] (MRR)
         # find rank of positive element if the list were sorted (i.e. find number of elements with higher similarity)
@@ -216,37 +195,22 @@ class MoCoModelPTL(pl.LightningModule):
         label_similarities = torch.tensor(label_list).type_as(docs_list)
 
         # need to enforce column-wise broadcasting
-        ranks = torch.sum(logits >= torch.transpose(label_similarities.view(1, -1), 0, 1),
-                          dim=1)  # sum up elements with >= similarity than positive embedding
+        ranks = torch.sum(logits >= torch.transpose(label_similarities.view(1, -1), 0, 1), dim=1)  # sum up elements with >= similarity than positive embedding
         mrr = (1 / ranks.shape[0]) * torch.sum(1 / ranks)
-
-        print(f"Validation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
-        self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
-        if base_path_acc=="Accuracy_enc/validation":
-            self.log("hp_metric", mrr, on_epoch=True, sync_dist=True)
 
         # [COMPUTE TOP5 AND TOP10 ACCURACY]
         # we can reuse the computation for the MRR
         top_5_correct_guesses = torch.sum(ranks <= 5)
-        top_10_correct_guesses = torch.sum(ranks <= 10)
-
         top_5_accuracy = top_5_correct_guesses / docs_list.shape[0]
-        top_10_accuracy = top_10_correct_guesses / docs_list.shape[0]
 
-        print(f"Validation {substring} top_5 accuracy (on gpu {self.global_rank}): {top_5_accuracy * 100:.3f}%")
-        print(f"Validation {substring} top_10 accuracy (on gpu {self.global_rank}): {top_10_accuracy * 100:.3f}%")
-        self.log_dict({f"{base_path_acc}/top_5": top_5_accuracy * 100, "step": self.current_epoch},on_epoch=True, sync_dist=True)
-        self.log_dict({f"{base_path_acc}/top_10": top_10_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        top_10_correct_guesses = torch.sum(ranks <= 10)
+        top_10_accuracy = top_10_correct_guesses / docs_list.shape[0]
 
         # [COMPUTE AVERAGE POSITIVE/NEGATIVE COSINE SIMILARITY]
         avg_pos_cos_similarity = torch.mean(label_similarities)
-        print(f"Validation {substring} avg_pos_cos_similarity (on gpu {self.global_rank}): {avg_pos_cos_similarity:.6f}")
-        self.log_dict({f"{base_path_sim}/cosine/positive": avg_pos_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # sum up all rows, subtract the similarity to the positive sample, then divide by number of samples-1 and finally compute mean over all samples
         avg_neg_cos_similarity = torch.mean((torch.sum(logits, dim=1) - label_similarities) / (code_list.shape[0] - 1))
-        print(f"Validation {substring} avg_neg_cos_similarity (on gpu {self.global_rank}): {avg_neg_cos_similarity:.6f}")
-        self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # free (potentially) a lot of memory
         del label_similarities
@@ -262,18 +226,37 @@ class MoCoModelPTL(pl.LightningModule):
         label_distances = torch.tensor(l2_label_list).type_as(docs_list)
 
         avg_pos_l2_distance = torch.mean(label_distances)
-        print(f"Validation {substring} avg_pos_l2_distance (on gpu {self.global_rank}): {avg_pos_l2_distance:.6f}")
-        self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # like for cosine similarity, compute average of negative similarities
         avg_neg_l2_distance = torch.mean((torch.sum(l2_distance_matrix, dim=1) - label_distances) / (code_list.shape[0] - 1))
-        print(f"Validation {substring} avg_neg_l2_distance (on gpu {self.global_rank}): {avg_neg_l2_distance:.6f}")
-        self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
         # for good measure
         del label_distances
         del l2_distance_matrix
 
+        # [LOG ALL GENERATED DATA]
+
+        # print to console (mostly for debugging purposes)
+        print(f"Validation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
+        print(f"Validation {substring} top_1 accuracy (on gpu {self.global_rank}): {top_1_accuracy * 100:.3f}%")
+        print(f"Validation {substring} top_5 accuracy (on gpu {self.global_rank}): {top_5_accuracy * 100:.3f}%")
+        print(f"Validation {substring} top_10 accuracy (on gpu {self.global_rank}): {top_10_accuracy * 100:.3f}%")
+        print(f"Validation {substring} avg_pos_cos_similarity (on gpu {self.global_rank}): {avg_pos_cos_similarity:.6f}")
+        print(f"Validation {substring} avg_neg_cos_similarity (on gpu {self.global_rank}): {avg_neg_cos_similarity:.6f}")
+        print(f"Validation {substring} avg_pos_l2_distance (on gpu {self.global_rank}): {avg_pos_l2_distance:.6f}")
+        print(f"Validation {substring} avg_neg_l2_distance (on gpu {self.global_rank}): {avg_neg_l2_distance:.6f}")
+
+        # log to logger (Tensorboard)
+        self.log_dict({f"{base_path_acc}/MRR": mrr, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        if base_path_acc=="Accuracy_enc/validation":
+            self.log("hp_metric", mrr, on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_acc}/top_1": top_1_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_acc}/top_5": top_5_accuracy * 100, "step": self.current_epoch},on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_acc}/top_10": top_10_accuracy * 100, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_sim}/cosine/positive": avg_pos_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_sim}/cosine/negative": avg_neg_cos_similarity, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_sim}/l2/positive": avg_pos_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
+        self.log_dict({f"{base_path_sim}/l2/negative": avg_neg_l2_distance, "step": self.current_epoch}, on_epoch=True, sync_dist=True)
 
 
     def validation_step(self, batch, batch_idx):
@@ -307,10 +290,8 @@ class MoCoModelPTL(pl.LightningModule):
         # print(f"In validation_epoch_end on {self.global_rank}, outputs[0][\"docs_embeddings\"] has shape {outputs[0]['docs_embeddings'].shape}, outputs[0][\"code_embeddings\"] has shape {outputs[0]['code_embeddings'].shape}")
         # print(f"outputs in validation_epoch_end on gpu {self.global_rank}: {outputs}")
 
-# to validate in parallel, we need to first obtain the complete code embedding matrix.
+        # to validate in parallel, we need to first obtain the complete code embedding matrix.
         # afterwards, we can compute the pairwise cosine similarity, but just on a subset of the data
-
-        #outputs = self.concatAllGather(outputs) # won't need this because validation_step_end already all_gathers # update: that is a big, fat, stupid lie and cost me like 2 hours lmao
 
         code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         if not self.args.disable_mlp:
@@ -323,8 +304,8 @@ class MoCoModelPTL(pl.LightningModule):
 
         code_emb_list = self.concatAllGather(code_emb_list)
         mlp_code_list = self.concatAllGather(mlp_code_list)
+
         # generate tensor that contains only the "assigned" code embeddings
-        world_size = torch.cuda.device_count()
         local_rank = self.global_rank
 
         docs_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
@@ -341,13 +322,10 @@ class MoCoModelPTL(pl.LightningModule):
         
         # print(f"in validation_epoch_end on {self.global_rank} with dataset doc shape of {outputs[0]['total_size']}")
 
-
-        # assert (docs_emb_list.shape == code_emb_list.shape)
         assert (docs_emb_list.shape[1] == 768)  # make sure we use the correct embeddings
         self.validation_computations(docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
 
         if not self.args.disable_mlp:
-            # assert (mlp_docs_list.shape == mlp_code_list.shape)
             assert (mlp_docs_list.shape[1] == 128)  # MLP embeddings are 128-dimensional
             self.validation_computations(mlp_docs_list, mlp_code_list, labels, "Accuracy_MLP/validation", "Similarity_MLP", substring="MLP")
 
@@ -368,12 +346,9 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-batch_size_{args.batch_size}-learning_rate_{args.learning_rate}-queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{torch.cuda.device_count()}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-effective_bs_{args.effective_batch_size}-lr_{args.learning_rate}-effective_queue_size_{args.max_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-disable_mlp_{args.disable_mlp}-num_gpus_{args.num_gpus}")
 
-    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
-
-
-#    trainer = pl.Trainer(gpus=-1, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, plugins="deepspeed", precision=args.precision)
+    trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
@@ -382,25 +357,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="microsoft/codebert-base")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--effective_batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--max_queue_size", type=int, default=64)
+    parser.add_argument("--effective_queue_size", type=int, default=64)
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", action="store_true", default=False)
     parser.add_argument("--augment", action="store_true", default=False)
     parser.add_argument("--disable_normalizing_encoder_embeddings_during_training", action="store_true", default=False) # used for some experiments. disabling normalization of the encoder embeddings during training will destroy performance!
     parser.add_argument("--disable_mlp", action="store_true", default=False) # this is a bad idea and will probably lower the performance. super unintuitive though.
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
-    parser.add_argument("--debug_data_skip_interval", type=int, default=400) # skips data during the loading process, which effectively makes us use a subset of the original data
+    parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--accelerator", type=str, default="dp")
     parser.add_argument("--plugins", type=str, default=None)
     parser.add_argument("--precision", type=int, default=16)
+    parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; batch_size={args.batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; queue_size={args.max_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_normalizing_encoder_embeddings_during_training={args.disable_normalizing_encoder_embeddings_during_training}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_normalizing_encoder_embeddings_during_training={args.disable_normalizing_encoder_embeddings_during_training}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}")
 
     execute(args)

@@ -122,7 +122,7 @@ def convert_examples_to_features(examples, tokenizer, stage=None):
     return features
 
 # ADAPTED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/code2nl/run.py
-def generateDataLoader(language, split, tokenizer, args, shuffle=False, augment=False, num_workers=0):
+def generateDataLoader(language, split, tokenizer, args, batch_size=1, shuffle=False, augment=False, num_workers=0):
     # we may want to augment several times independently and reloading the original data every time
     # is the only way I could find to make sure we start from the original data every time (Datasets have no copy method)
 
