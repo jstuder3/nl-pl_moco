@@ -39,6 +39,6 @@ There are many flags, some for hyperparameters and some for debugging:
 
 An example command can be seen below:
 
-    python main_pl_new_ds.py --augment --debug_data_skip_interval=100 --effective_queue_size=4096 --effective_batch_size=64 --base_data_folder="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet" --accelerator="ddp"
+    python main_pl_new_ds.py --augment --debug_data_skip_interval=1 --effective_queue_size=4096 --effective_batch_size=64 --base_data_folder="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet" --accelerator="ddp"
     
 Note: For correct results, it is necessary that effective_queue_size < #samples because otherwise duplicate embeddings could be in the queue.
