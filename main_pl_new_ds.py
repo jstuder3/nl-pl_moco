@@ -27,6 +27,7 @@ class MoCoModelPTL(pl.LightningModule):
         self.num_gpus = args.num_gpus
 
         self.register_buffer("queue", torch.randn(self.effective_queue_size, 768)) # queue has dimensions [queue_size, 768]. we initialize it with random numbers to prevent fitting entries which wouldn't actually contain anything yet if we were to use a list
+        self.register_buffer("queue_indices", torch.empty(self.effective_queue_size).fill_(-1))
         self.register_buffer("current_index", torch.zeros(1, dtype=torch.long))
 
         if not self.args.disable_mlp:
@@ -43,8 +44,6 @@ class MoCoModelPTL(pl.LightningModule):
     def train_dataloader(self):
         # the train_loader contains the batches for each GPU, so the batch size for it is the effective batch size divided by the number of gpus
         train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
-        assert self.effective_queue_size<((len(train_loader)*(self.batch_size/self.args.num_gpus))), f"Assertion error: Queue size {self.effective_queue_size} is too large. The same batche might be contained multiple times in the queue. Plese increase amount of data or decrease queue size for correct learning behaviour. (current number of samples: {len(train_loader)*int((self.batch_size/self.num_gpus))})"
-
         return train_loader
 
     def val_dataloader(self):
@@ -58,15 +57,17 @@ class MoCoModelPTL(pl.LightningModule):
         for name, param in self.momentum_encoder.named_parameters():
             param = self.update_weight * param + (1 - self.update_weight) * encoder_params[name]
 
-    def replaceOldestQueueEntry(self, newEntry):
+    def replaceOldestQueueEntry(self, newEntry, newIndices):
 
         # DIFFERENCE TO SINGLE-GPU IMPLEMENTATION: NEED TO GATHER THE CODE EMBEDDINGS OF ALL OTHER GPUS OF THIS ITERATION
 
         gatheredNewEntries = self.concatAllGather(newEntry)
+        gatheredNewIndices = self.concatAllGather(newIndices)
 
         # this function will replace the oldest ("most stale") entry of the queue
         pointer = int(self.current_index)
         self.queue[pointer : pointer+self.batch_size, :] = gatheredNewEntries.detach()  # we detach to make sure that we don't waste memory
+        self.queue_indices[pointer:pointer+self.batch_size] = gatheredNewIndices
         self.current_index[0] = (self.current_index+self.batch_size) % self.effective_queue_size #current_index should point at the beginning of a "block" of size batch_size
 
     def concatAllQueueEntries(self):
@@ -110,6 +111,7 @@ class MoCoModelPTL(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         doc_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
+        batch_indices = batch["index"]
 
         current_batch_size = doc_samples["input_ids"].shape[0]
 
@@ -145,8 +147,6 @@ class MoCoModelPTL(pl.LightningModule):
             neg_mlp_emb = F.normalize(neg_mlp_emb, p=2, dim=1)
         pos_mlp_emb = F.normalize(pos_mlp_emb, p=2, dim=1)
 
-        # [UPDATE THE QUEUE]
-        self.replaceOldestQueueEntry(positive_momentum_encoder_embeddings)
 
         # [COMPUTE LOSS]
 
@@ -160,11 +160,20 @@ class MoCoModelPTL(pl.LightningModule):
         else:
             logits = l_pos.view((current_batch_size, 1))
 
+        # new: remove/mask out any logits entry for which the queue contained a duplicate 
+        # could do this further above to save some computations, but this could introduce many bugs related to dimensionality, so I will assume that it is rare for collisions to occur and the overhead of doing it down here is minimal
+        inclusion_list=torch.tensor([index for index, x in enumerate(batch_indices) if x not in self.queue_indices]).type_as(logits).long()
+        logits=logits[inclusion_list]
+
         # labels: l_pos should always contain the smallest values
-        labels = torch.tensor([0 for h in range(current_batch_size)]).type_as(code_samples["input_ids"])  # ugly but does the job
+        labels = torch.tensor([0 for h in range(len(inclusion_list))]).type_as(code_samples["input_ids"])  # ugly but does the job
 
         loss = nn.CrossEntropyLoss()(logits / self.args.temperature, labels)
 
+        # [UPDATE THE QUEUE]
+        self.replaceOldestQueueEntry(positive_momentum_encoder_embeddings, batch_indices)
+
+        # [LOG THE LOSS]
         self.log("Loss/training", loss.item(), sync_dist=True)
 
         return loss
