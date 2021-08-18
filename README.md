@@ -1,7 +1,6 @@
 Repository for bachelor thesis, where I try to improve on previous nl-pl methods by applying the MoCoV2 (and later possibly the xMoCo) framework.
 
-For comparable results (using main_new_ds.py or main_pl_new_ds.py), it is required to download the pre-processed and pre-filtered CodeSearchNet dataset by the authors of CodeBERT from https://github.com/microsoft/CodeBERT/tree/master/CodeBERT/code2nl 
-(download link: https://drive.google.com/file/d/1rd2Tc6oUWBo7JouwexW3ksQ0PaOhUr6h).
+For comparable results (using main_pl_new_ds.py), it is required to download the pre-processed and pre-filtered CodeSearchNet dataset by the authors of CodeBERT from https://github.com/microsoft/CodeBERT/tree/master/CodeBERT/code2nl (download link: https://drive.google.com/file/d/1rd2Tc6oUWBo7JouwexW3ksQ0PaOhUr6h).
 
 Place the unpacked data (the "CodeSearchNet" folder) in "datasets/" (so you would e.g. have the Python training data under "datasets/CodeSearchNet/python/train.jsonl")
 
@@ -39,6 +38,6 @@ There are many flags, some for hyperparameters and some for debugging:
 
 An example command can be seen below:
 
-    python main_pl_new_ds.py --augment --debug_data_skip_interval=1 --effective_queue_size=4096 --effective_batch_size=64 --base_data_folder="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet" --accelerator="ddp"
+    python main_pl_new_ds.py --augment --num_epochs=20 --learning_rate=2e-5 --debug_data_skip_interval 1 --effective_queue_size=4096 --effective_batch_size=64 --num_gpus=4 --base_data_folder="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet" --accelerator="ddp"
     
 Note: For correct results, it is necessary that effective_queue_size < #samples because otherwise duplicate embeddings could be in the queue.
