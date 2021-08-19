@@ -59,13 +59,13 @@ class xMoCoModelPTL(pl.LightningModule):
     @torch.no_grad()
     def train_dataloader(self):
         self.load_tokenizers()
-        train_loader = generateDataLoader("python", "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)#int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        train_loader = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
         return train_loader
 
     @torch.no_grad()
     def val_dataloader(self):
         self.load_tokenizers()
-        val_loader = generateDataLoader("python", "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers)  # int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+        val_loader = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers)
         return val_loader
 
     # ADAPTED FROM https://github.com/PyTorchLightning/lightning-bolts/blob/master/pl_bolts/models/self_supervised/moco/moco2_module.py#L137
@@ -143,19 +143,23 @@ class xMoCoModelPTL(pl.LightningModule):
         logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
         logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
 
-        # remove/mask out any logits entry for which the queue contained a duplicate
-        inclusion_list = torch.tensor([index for index, x in enumerate(batch_indices) if x not in self.code_indices]).type_as(logits_nl_pl).long()
-        logits_nl_pl=logits_nl_pl[inclusion_list]
-        logits_pl_nl=logits_pl_nl[inclusion_list]
+        if not self.args.dont_remove_duplicates: # extremely computationally expensive
+            # remove/mask out any logits entry for which the queue contained a duplicate
+            inclusion_list = torch.tensor([index for index, x in enumerate(batch_indices) if x not in self.code_indices]).type_as(logits_nl_pl).long()
+            logits_nl_pl=logits_nl_pl[inclusion_list]
+            logits_pl_nl=logits_pl_nl[inclusion_list]
 
         # labels: the entries from l_pos should always contain the smallest values
-        labels = torch.tensor([0 for _ in range(len(inclusion_list))]).type_as(code_samples["input_ids"])
+        labels = torch.tensor([0 for _ in range(logits_nl_pl.shape[0])]).type_as(code_samples["input_ids"])
         loss_nl_pl = nn.CrossEntropyLoss()(logits_nl_pl/self.temperature, labels)
+
         loss_pl_nl = nn.CrossEntropyLoss()(logits_pl_nl/self.temperature, labels)
 
-        loss = (loss_nl_pl + loss_pl_nl) / 2
+        loss = (loss_nl_pl + loss_pl_nl) / 2.0
 
         self.log("Loss/training", loss.item(), sync_dist=True)
+
+        #print(f"Loss on GPU {self.global_rank}: {loss.item()} with loss_nl_pl {loss_nl_pl.item()}, loss_pl_nl {loss_pl_nl.item()}")
 
         # [UPDATE THE QUEUES]
         #negative_slow_docs_embeddings, negative_slow_code_embeddings = self.slow_forward(docs_samples, code_samples)
@@ -213,7 +217,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-effective_bs_{args.effective_batch_size}-lr_{args.learning_rate}-effective_queue_size_{args.effective_queue_size}-max_epochs_{args.num_epochs}-augment_{args.augment}-shuffle_{args.shuffle}-debug_data_skip_interval_{args.debug_data_skip_interval}-always_use_full_val_{args.always_use_full_val}-docs_encoder{args.docs_encoder}-code_encoder_{args.code_encoder}-num_gpus_{args.num_gpus}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}; no_rmv_dup_{args.dont_remove_duplicates}")
 
     trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
@@ -235,14 +239,16 @@ if __name__ == "__main__":
     parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
+    parser.add_argument("--dont_remove_duplicates", action="store_false", default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--accelerator", type=str, default="dp")
     parser.add_argument("--plugins", type=str, default=None)
     parser.add_argument("--precision", type=int, default=16)
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
+    parser.add_argument("--language", type=str, default="python")
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}")
 
     execute(args)
