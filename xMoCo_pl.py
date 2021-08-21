@@ -158,8 +158,8 @@ class xMoCoModelPTL(pl.LightningModule):
             l_pos_nl_pl = torch.bmm(docs_mlp_embeddings.view((current_batch_size, 1, -1)), positive_mlp_code_embeddings.view((current_batch_size, -1, 1))) # compute similarity between positive fast_docs/slow_code pairs
             l_pos_pl_nl = torch.bmm(code_mlp_embeddings.view((current_batch_size, 1, -1)), positive_mlp_docs_embeddings.view((current_batch_size, -1, 1))) # compute similarity between positive fast_code/slow_docs pairs
 
-            l_neg_nl_pl = torch.matmul(docs_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(code_queue_mlp_embeddings))
-            l_neg_pl_nl = torch.matmul(code_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(docs_queue_mlp_embeddings))
+            l_neg_nl_pl = torch.matmul(docs_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(code_queue_mlp_embeddings, 0, 1))
+            l_neg_pl_nl = torch.matmul(code_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(docs_queue_mlp_embeddings, 0, 1))
 
         else:
             # [COMPUTE LOSS DIRECTLY ON ENCODER OUTPUT]
