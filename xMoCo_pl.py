@@ -117,7 +117,7 @@ class xMoCoModelPTL(pl.LightningModule):
             slow_code_embeddings = self.code_slow_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return slow_docs_embeddings, slow_code_embeddings
 
-    def mlp_foward(self, positive_fast_encodings, positive_slow_encodings, queue_encodings, fast_mlp, slow_mlp):#, additional_samples=None): # can we possibly use this in combination with the hard negatives? #assumption for now: this probably won't work
+    def mlp_forward(self, positive_fast_encodings, positive_slow_encodings, queue_encodings, fast_mlp, slow_mlp):#, additional_samples=None): # can we possibly use this in combination with the hard negatives? #assumption for now: this probably won't work
         assert self.args.enable_mlp, "Assertion failed: Called mlp_forward while enable_mlp flag was not set"
 
         positive_mlp_encodings = fast_mlp(positive_fast_encodings)
