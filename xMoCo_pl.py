@@ -24,6 +24,12 @@ class xMoCoModelPTL(pl.LightningModule):
         self.code_fast_encoder = AutoModel.from_pretrained(args.code_encoder)
         self.code_slow_encoder = AutoModel.from_pretrained(args.code_encoder)
 
+        if args.enable_mlp:
+            self.docs_fast_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
+            self.docs_slow_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
+            self.code_fast_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
+            self.code_slow_mlp = nn.Sequential(nn.Linear(768, 2048), nn.ReLU(), nn.Linear(2048, 128))
+
         self.effective_queue_size = args.effective_queue_size
         self.update_weight = args.momentum_update_weight
         self.batch_size = args.effective_batch_size
@@ -111,6 +117,18 @@ class xMoCoModelPTL(pl.LightningModule):
             slow_code_embeddings = self.code_slow_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return slow_docs_embeddings, slow_code_embeddings
 
+    def mlp_foward(self, positive_fast_encodings, positive_slow_encodings, queue_encodings, fast_mlp, slow_mlp):#, additional_samples=None): # can we possibly use this in combination with the hard negatives? #assumption for now: this probably won't work
+        assert self.args.enable_mlp, "Assertion failed: Called mlp_forward while enable_mlp flag was not set"
+
+        positive_mlp_encodings = fast_mlp(positive_fast_encodings)
+        positive_slow_mlp_encodings = slow_mlp(positive_slow_encodings)
+        queue_mlp_encodings = slow_mlp(queue_encodings)
+
+        #if additional_samples:
+        #    additional_encodings = slow_mlp(additional_samples) # slow or fast here for the hard negatives? either one seems wrong because the hard negatives are probably already stale
+        #    return positive_mlp_encodings, queue_mlp_encodings, additional_encodings
+        return positive_mlp_encodings, positive_slow_mlp_encodings, queue_mlp_encodings
+
     def training_step(self, batch, batch_idx):
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
@@ -131,14 +149,27 @@ class xMoCoModelPTL(pl.LightningModule):
         positive_slow_docs_embeddings = F.normalize(positive_slow_docs_embeddings, p=2, dim=1)
         positive_slow_code_embeddings = F.normalize(positive_slow_code_embeddings, p=2, dim=1)
 
-        # [COMPUTE LOSS]
+        if self.args.enable_mlp:
+            # [MLP FORWARD PASS]
+            docs_mlp_embeddings, positive_mlp_docs_embeddings, docs_queue_mlp_embeddings = self.mlp_forward(docs_embeddings, positive_slow_docs_embeddings, self.docs_queue, self.docs_fast_mlp, self.docs_slow_mlp)
+            code_mlp_embeddings, positive_mlp_code_embeddings, code_queue_mlp_embeddings = self.mlp_forward(code_embeddings, positive_slow_code_embeddings, self.code_queue, self.code_fast_mlp, self.code_slow_mlp)
 
-        # compute similarity of positive fast_NL/slow_PL pairs
-        l_pos_nl_pl = torch.bmm(docs_embeddings.view((current_batch_size, 1, -1)), positive_slow_code_embeddings.view((current_batch_size, -1, 1)))
-        l_pos_pl_nl = torch.bmm(code_embeddings.view((current_batch_size, 1, -1)), positive_slow_docs_embeddings.view((current_batch_size, -1, 1)))
+            # [COMPUTE LOSS ON MLP OUPTUTS]
+            l_pos_nl_pl = torch.bmm(docs_mlp_embeddings.view((current_batch_size, 1, -1)), positive_mlp_code_embeddings.view((current_batch_size, -1, 1))) # compute similarity between positive fast_docs/slow_code pairs
+            l_pos_pl_nl = torch.bmm(code_mlp_embeddings.view((current_batch_size, 1, -1)), positive_mlp_docs_embeddings.view((current_batch_size, -1, 1))) # compute similarity between positive fast_code/slow_docs pairs
 
-        l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
-        l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
+            l_neg_nl_pl = torch.matmul(docs_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(code_queue_mlp_embeddings))
+            l_neg_pl_nl = torch.matmul(code_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(docs_queue_mlp_embeddings))
+
+        else:
+            # [COMPUTE LOSS DIRECTLY ON ENCODER OUTPUT]
+
+            # compute similarity of positive fast_NL/slow_PL pairs
+            l_pos_nl_pl = torch.bmm(docs_embeddings.view((current_batch_size, 1, -1)), positive_slow_code_embeddings.view((current_batch_size, -1, 1)))
+            l_pos_pl_nl = torch.bmm(code_embeddings.view((current_batch_size, 1, -1)), positive_slow_docs_embeddings.view((current_batch_size, -1, 1)))
+
+            l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
+            l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
 
         logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
         logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
@@ -247,8 +278,9 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=int, default=16)
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--language", type=str, default="python")
+    parser.add_argument("--enable_mlp", action="store_true", default=False) # it's very much possible that this will suck up an incredible amount of gpu memory depending on the queue size, so use with caution
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}")
 
     execute(args)
