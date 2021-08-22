@@ -14,6 +14,14 @@ To download this using command line, do the following:
     rm Cleaned_CodeSearchNet.zip
     cd ..
 
+Requirements:
+    Python v3.9+
+    pytorch
+    pytorch-lightning
+    transformers
+    datasets
+    faiss
+
 There are many flags for main_MoCoV2_pl.py, some for hyperparameters and some for debugging:
 
     --model_name: huggingface model path (needs to have 768 embedding size)
