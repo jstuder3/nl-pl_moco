@@ -14,8 +14,9 @@ To download this using command line, do the following:
     rm Cleaned_CodeSearchNet.zip
     cd ..
 
-Requirements:
-    Python v3.9+
+Requirements to run:
+
+    Python 3.9+
     pytorch
     pytorch-lightning
     transformers
