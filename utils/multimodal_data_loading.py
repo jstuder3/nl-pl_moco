@@ -161,7 +161,7 @@ def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, sh
 
     dataloader = DataLoader(data, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
-    if args.use_hard_negatives:
+    if args.use_hard_negatives and split=="train":
         return dataloader, data
     else:
         return dataloader

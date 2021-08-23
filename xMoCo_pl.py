@@ -10,7 +10,7 @@ import numpy as np
 
 from utils.multimodal_data_loading import generateDataLoader
 from utils.metric_computation import validation_computations
-from utils.hard_negative_search import generateHardNegativeSearchIndex
+from utils.hard_negative_search import generateHardNegativeSearchIndices
 
 class xMoCoModelPTL(pl.LightningModule):
     def __init__(self, args):
@@ -66,12 +66,14 @@ class xMoCoModelPTL(pl.LightningModule):
     @torch.no_grad()
     def train_dataloader(self):
         self.load_tokenizers()
-        train_loader = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
+        train_loader, self.raw_data = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
+ 
+        assert self.raw_data
 
-    if self.args.use_hard_negatives:
-        generateHardNegativeSearchIndices(self) # need to do this before every training epoch
+        if self.args.use_hard_negatives:
+            generateHardNegativeSearchIndices(self) # need to do this before every training epoch
 
-    return train_loader
+        return train_loader
 
     @torch.no_grad()
     def val_dataloader(self):
@@ -185,12 +187,11 @@ class xMoCoModelPTL(pl.LightningModule):
             l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
 
             if args.use_hard_negatives:
-                pass
-               # do batch matrix mulitplication
-               l_hard_neg_nl_pl = torch.bmm(hard_negative_docs.view((current_batch_size, args.hard_negative_samples, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
-               l_hard_neg_pl_nl = torch.bmm(hard_negative_code.view((current_batch_size, args.hard_negative_samples, 768)), code_embeddings.view((current_batch_size, 768, 1)))
-               # set entries to zero (or -1) where the hard negative is actually a hard false negative (i.e. same index as query) (we need to do it this way beause we have to ensure that the rows have same length; since the entries in the FAISS index could be stale or not, either 0 or 1 entry in the nearest neighbours are identical)
-               false_negatives_list = [[index for index, x, in enumerate(local_negatives) if x == batch_indices[sample_index]] for sample_index, local_negatives in enumerate(hard_negative_docs_indices)]
+                # do batch matrix mulitplication
+                l_hard_neg_nl_pl = torch.bmm(hard_negative_docs.view((current_batch_size, args.hard_negative_samples, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
+                l_hard_neg_pl_nl = torch.bmm(hard_negative_code.view((current_batch_size, args.hard_negative_samples, 768)), code_embeddings.view((current_batch_size, 768, 1)))
+                # set entries to zero (or -1) where the hard negative is actually a hard false negative (i.e. same index as query) (we need to do it this way beause we have to ensure that the rows have same length; since the entries in the FAISS index could be stale or not, either 0 or 1 entry in the nearest neighbours are identical)
+                false_negatives_list = [[index for index, x, in enumerate(local_negatives) if x == batch_indices[sample_index]] for sample_index, local_negatives in enumerate(hard_negative_docs_indices)]
                 l_hard_neg_nl_pl[false_negatives_list] = -1
                 l_hard_neg_pl_nl[false_negatives_list] = -1
 
@@ -311,6 +312,6 @@ if __name__ == "__main__":
     parser.add_argument("--hard_negative_samples", type=int, default=10)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, hard_negative_samples={0 if not args.use_hard_negatives else args.hard_negative_samples")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, hard_negative_samples={0 if not args.use_hard_negatives else args.hard_negative_samples}")
 
     execute(args)
