@@ -161,6 +161,9 @@ def generateDataLoader(language, split, tokenizer, args, batch_size=1, shuffle=F
 
     dataloader = DataLoader(data, batch_size=batch_size, drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
-    return dataloader
+    if args.use_hard_negatives:
+        return dataloader, data
+    else:
+        return dataloader
 
 

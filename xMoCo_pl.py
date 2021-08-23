@@ -10,6 +10,7 @@ import numpy as np
 
 from utils.multimodal_data_loading import generateDataLoader
 from utils.metric_computation import validation_computations
+from utils.hard_negative_search import generateHardNegativeSearchIndex
 
 class xMoCoModelPTL(pl.LightningModule):
     def __init__(self, args):
@@ -66,7 +67,11 @@ class xMoCoModelPTL(pl.LightningModule):
     def train_dataloader(self):
         self.load_tokenizers()
         train_loader = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
-        return train_loader
+
+    if self.args.use_hard_negatives:
+        generateHardNegativeSearchIndices(self) # need to do this before every training epoch
+
+    return train_loader
 
     @torch.no_grad()
     def val_dataloader(self):
@@ -162,6 +167,14 @@ class xMoCoModelPTL(pl.LightningModule):
             l_neg_pl_nl = torch.matmul(code_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(docs_queue_mlp_embeddings, 0, 1))
 
         else:
+
+            # [FIND HARD NEGATIVES] (if enabled, also, this is only implemented in the non-MLP version for now)
+            if args.use_hard_negatives:
+                _, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.numpy(), self.args.hard_negative_samples) # is it correct to use code_faiss here and docs_faiss below?
+                _, hard_negative_code_indices = self.docs_faiss.search(code_embeddings.numpy(), self.args.hard_negative_samples)
+                hard_negative_docs = self.raw_data[hard_negative_docs_indices].type_as(code_samples["input_ids"])
+                hard_negative_code = self.raw_data[hard_negative_code_indices].type_as(code_samples["input_ids"])
+
             # [COMPUTE LOSS DIRECTLY ON ENCODER OUTPUT]
 
             # compute similarity of positive fast_NL/slow_PL pairs
@@ -171,8 +184,23 @@ class xMoCoModelPTL(pl.LightningModule):
             l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
             l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
 
-        logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
-        logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
+            if args.use_hard_negatives:
+                pass
+               # do batch matrix mulitplication
+               l_hard_neg_nl_pl = torch.bmm(hard_negative_docs.view((current_batch_size, args.hard_negative_samples, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
+               l_hard_neg_pl_nl = torch.bmm(hard_negative_code.view((current_batch_size, args.hard_negative_samples, 768)), code_embeddings.view((current_batch_size, 768, 1)))
+               # set entries to zero (or -1) where the hard negative is actually a hard false negative (i.e. same index as query) (we need to do it this way beause we have to ensure that the rows have same length; since the entries in the FAISS index could be stale or not, either 0 or 1 entry in the nearest neighbours are identical)
+               false_negatives_list = [[index for index, x, in enumerate(local_negatives) if x == batch_indices[sample_index]] for sample_index, local_negatives in enumerate(hard_negative_docs_indices)]
+                l_hard_neg_nl_pl[false_negatives_list] = -1
+                l_hard_neg_pl_nl[false_negatives_list] = -1
+
+
+        if args.use_hard_negatives:
+            logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl, l_hard_neg_nl_pl), dim=1)
+            logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl, l_hard_neg_pl_nl), dim=1)
+        else:
+            logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
+            logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
 
         if not self.args.dont_remove_duplicates: # extremely computationally expensive
             # remove/mask out any logits entry for which the queue contained a duplicate
@@ -248,7 +276,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}; no_rmv_dup_{args.dont_remove_duplicates}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-no_rmv_dup_{args.dont_remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-hard_negative_samples_{0 if not args.use_hard_negatives else args.hard_negative_samples}")
 
     trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
@@ -279,8 +307,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--language", type=str, default="python")
     parser.add_argument("--enable_mlp", action="store_true", default=False) # it's very much possible that this will suck up an incredible amount of gpu memory depending on the queue size, so use with caution
+    parser.add_argument("--use_hard_negatives", action="store_true", default=False)
+    parser.add_argument("--hard_negative_samples", type=int, default=10)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, dont_remove_duplicates={args.dont_remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, hard_negative_samples={0 if not args.use_hard_negatives else args.hard_negative_samples")
 
     execute(args)
