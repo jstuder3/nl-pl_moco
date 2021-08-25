@@ -116,7 +116,7 @@ class MoCoModelPTL(pl.LightningModule):
         batch_indices = batch["index"]
 
         current_batch_size = doc_samples["input_ids"].shape[0]
-
+        print(batch_indices)
         # print(doc_samples["input_ids"].shape)
         # print(f"In training_step on {self.global_rank}, doc_samples[\"input_ids\"] has shape {doc_samples['input_ids'].shape}")
 
@@ -385,6 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--plugins", type=str, default=None)
     parser.add_argument("--precision", type=int, default=16)
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
+    parser.add_argument("--use_hard_negatives", action="store_true", default=False)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_normalizing_encoder_embeddings_during_training={args.disable_normalizing_encoder_embeddings_during_training}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}")

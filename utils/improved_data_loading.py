@@ -161,7 +161,7 @@ def generateDataLoader(language, split, tokenizer, args, batch_size=1, shuffle=F
 
     dataloader = DataLoader(data, batch_size=batch_size, drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
-    if args.use_hard_negatives and split="train":
+    if args.use_hard_negatives and split=="train":
         return dataloader, data
     else:
         return dataloader
