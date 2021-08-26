@@ -13,9 +13,9 @@ import os
 
 import time
 
-from utils.multimodal_data_loading import generateDataLoader
+from utils.improved_data_loading import generateDataLoader
 from utils.metric_computation import validation_computations
-from utils.hard_negative_search import generateHardNegativeSearchIndices
+from utils.single_modality_hard_negative_search import generateHardNegativeSearchIndices
 
 os.environ["TOKENIZERS_PARALLELISM"]="false"
 
@@ -44,10 +44,10 @@ class DyHardCodeModel(pl.LightningModule):
         if self.tokenizer == None:
             self.tokenizer = AutoTokenizer.from_pretrained(self.args.model_name)
         if args.use_hard_negatives:
-            train_loader, self.raw_data = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size / self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)  # int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+            train_loader, self.raw_data = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)  # int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
             generateHardNegativeSearchIndices(self) #THIS WILL NOT WORK BECAUSE IT'S LAID OUT TO BE USED FOR MULTI-MODALITY INDEX GENERATION
         else:
-            train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size / self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)  # int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
+            train_loader = generateDataLoader("python", "train", self.tokenizer, self.args, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)  # int(math.floor(multiprocessing.cpu_count()/torch.cuda.device_count())))
         return train_loader
 
     def val_dataloader(self):
@@ -97,7 +97,7 @@ class DyHardCodeModel(pl.LightningModule):
         else:
             logits = l_pos
 
-        labels = torch.tensor([i for i in range(docs_samples.shape[0])]).type_as(docs_samples["input_ids"]) #this has to be of type long
+        labels = torch.tensor([i for i in range(docs_embeddings.shape[0])]).type_as(docs_samples["input_ids"]) #this has to be of type long
 
         loss = nn.CrossEntropyLoss()(logits/self.temperature, labels)
 
@@ -153,7 +153,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-DyHardCode-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.model_name}-num_gpus_{args.num_gpus}-use_hard_negatives_{args.use_hard_negatives}-hard_negative_samples_{0 if not args.use_hard_negatives else args.hard_negative_samples}")
 
-    trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+    trainer = pl.Trainer(log_gpu_memory="all", gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
@@ -181,6 +181,7 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=int, default=16)
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--use_hard_negatives", action="store_true", default=False)
+    parser.add_argument("--hard_negative_samples", type=int, default=10)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_normalizing_encoder_embeddings_during_training={args.disable_normalizing_encoder_embeddings_during_training}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}")

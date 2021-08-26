@@ -14,7 +14,7 @@ def generateHardNegativeSearchIndices(self):
 
     assert self.args.use_hard_negatives
 
-    self.negative_matrix = torch.tensor([]).type_as(self.docs_queue).float()  # yeah, I know this is ugly
+    self.negative_matrix = torch.tensor([]).cuda().float()  # yeah, I know this is ugly
 
     local_rank = self.global_rank
     data = self.raw_data
@@ -31,7 +31,7 @@ def generateHardNegativeSearchIndices(self):
             sys.stdout.flush()
         start_index = int(iteration * batch_size * num_gpus + local_rank * batch_size)
         batch = data[start_index: start_index + batch_size]
-        code_samples = {"input_ids": batch["code_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["code_attention_mask"].type_as(self.docs_current_index)}
+        code_samples = {"input_ids": batch["code_input_ids"].cuda().long(), "attention_mask": batch["code_attention_mask"].cuda().long()}
 
         with torch.no_grad():
             code_embeddings = self.encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
