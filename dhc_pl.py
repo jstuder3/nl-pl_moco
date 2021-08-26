@@ -90,7 +90,7 @@ class DyHardCodeModel(pl.LightningModule):
         l_pos = torch.matmul(docs_embeddings, torch.transpose(code_embeddings, 0, 1))
 
         if self.args.use_hard_negatives:
-            hard_negative_docs_similarities, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)
+            hard_negative_docs_similarities, hard_negative_docs_indices = self.faiss_index.search(docs_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)
             l_neg = torch.from_numpy(hard_negative_docs_similarities).type_as(docs_embeddings) # this has to be of type float32
             logits = torch.cat((l_pos, l_neg), dim=1)
 
