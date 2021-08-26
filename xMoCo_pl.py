@@ -154,7 +154,6 @@ class xMoCoModelPTL(pl.LightningModule):
         return positive_mlp_encodings, positive_slow_mlp_encodings, queue_mlp_encodings
 
     def training_step(self, batch, batch_idx):
-        st = time.time()
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
         batch_indices = batch["index"]
@@ -187,8 +186,6 @@ class xMoCoModelPTL(pl.LightningModule):
             l_neg_pl_nl = torch.matmul(code_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(docs_queue_mlp_embeddings, 0, 1))
 
         else:
-            print(f"Until else it took {time.time()-st} seconds")
-            st = time.time()
             # [FIND HARD NEGATIVES] (if enabled, also, this is only implemented in the non-MLP version for now)
             if args.use_hard_negatives:
 
@@ -210,8 +207,6 @@ class xMoCoModelPTL(pl.LightningModule):
 
             l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
             l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
-            print(f"Until before bmm on hard negatives it took {time.time()-st} seconds")
-            st = time.time()
             if args.use_hard_negatives:
                 l_hard_neg_nl_pl = torch.bmm(hard_negative_docs_embeddings.view((current_batch_size, args.hard_negative_samples, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
                 l_hard_neg_pl_nl = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, args.hard_negative_samples, 768)), code_embeddings.view((current_batch_size, 768, 1)))
@@ -219,21 +214,21 @@ class xMoCoModelPTL(pl.LightningModule):
                 l_hard_neg_nl_pl = torch.squeeze(l_hard_neg_nl_pl)
                 l_hard_neg_pl_nl = torch.squeeze(l_hard_neg_pl_nl)
 
-            if self.args.remove_duplicates: # extremely computationally expensive
+        if self.args.remove_duplicates: # extremely computationally expensive
             # mask out any logits entry for which the queue entry is a duplicate of the positive sample
-                masking_list = []#[[target for target, index in enumerate(line) if index==pos_index] for ]#[index for index, x in enumerate(batch_indices) if x in self.code_indices]
-                for k in range(current_batch_size):
-                    pos_index = batch_indices[k]
-                    cache_list = []
-                    for i, line in enumerate(self.docs_indices):
-                        if line==pos_index:
-                            cache_list.append(i)
-                    masking_list.append(cache_list)
+            masking_list = []#[[target for target, index in enumerate(line) if index==pos_index] for ]#[index for index, x in enumerate(batch_indices) if x in self.code_indices]
+            for k in range(current_batch_size):
+                pos_index = batch_indices[k]
+                cache_list = []
+                for i, line in enumerate(self.docs_indices):
+                    if line==pos_index:
+                        cache_list.append(i)
+                masking_list.append(cache_list)
 
-                # print("masking list generated...")
-                for i, mask in enumerate(masking_list):
-                    l_neg_nl_pl[i, mask]=-1
-                    l_neg_pl_nl[i, mask]=-1
+            # print("masking list generated...")
+            for i, mask in enumerate(masking_list):
+                l_neg_nl_pl[i, mask]=-1
+                l_neg_pl_nl[i, mask]=-1
 
         if args.use_hard_negatives:
             logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl, l_hard_neg_nl_pl), dim=1)
@@ -241,26 +236,17 @@ class xMoCoModelPTL(pl.LightningModule):
         else:
             logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
             logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
-        print(f"Until after logits concat it took {time.time()-st}")
-        st= time.time()
 
         loss_nl_pl = nn.CrossEntropyLoss()(logits_nl_pl/self.temperature, self.labels)
 
         loss_pl_nl = nn.CrossEntropyLoss()(logits_pl_nl/self.temperature, self.labels)
-        print(f"Basic loss compuattion took {time.time()-st} seconds")
-        st = time.time()
 
         loss = (loss_nl_pl + loss_pl_nl) / 2.0
 
         # [UPDATE THE QUEUES]
-        print(f"Accumulated loss computatino took {time.time()-st} seconds")
-        st = time.time()
         self.log("Loss/training", loss.item(), sync_dist=True)
-        print(f"Logging took {time.time()-st} seconds")
-        st= time.time()
         self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices)
         self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices)
-        print(f"Queue replacement took {time.time()-st} seconds")
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -331,7 +317,7 @@ if __name__ == "__main__":
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", action="store_true", default=False) # note: when using dp or ddp, the value of this will be ignored and the dataset will always be shuffled (would need to make a custom DistributedSampler to prevent this)
     parser.add_argument("--augment", action="store_true", default=False)
-    parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
+    parser.add_argument("--base_data_folder", type=str, default="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
     parser.add_argument("--remove_duplicates", action="store_true", default=False)
@@ -344,7 +330,7 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="python")
     parser.add_argument("--enable_mlp", action="store_true", default=False) # it's very much possible that this will suck up an incredible amount of gpu memory depending on the queue size, so use with caution
     parser.add_argument("--use_hard_negatives", action="store_true", default=False)
-    parser.add_argument("--hard_negative_samples", type=int, default=4)
+    parser.add_argument("--hard_negative_samples", type=int, default=10)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, hard_negative_samples={0 if not args.use_hard_negatives else args.hard_negative_samples}")
