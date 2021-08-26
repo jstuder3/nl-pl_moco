@@ -8,8 +8,6 @@ import random
 from datetime import datetime
 import numpy as np
 import os
-#import faiss
-#from faiss.contrib.exhaustive_search import knn
 
 import time
 
@@ -18,7 +16,7 @@ from utils.metric_computation import validation_computations
 from utils.hard_negative_search import generateHardNegativeSearchIndices
 
 os.environ["TOKENIZERS_PARALLELISM"]="false"
-#os.environ["OMP_WAIT_POLICY"]="PASSIVE"
+os.environ["OMP_WAIT_POLICY"]="PASSIVE"
 
 class xMoCoModelPTL(pl.LightningModule):
     def __init__(self, args):
@@ -49,8 +47,6 @@ class xMoCoModelPTL(pl.LightningModule):
         self.raw_data=None
         self.negative_docs_queue = None
         self.negative_code_queue = None
-        #self.negative_docs_numpy = None
-        #self.negative_code_numpy = None
 
         # queues
         self.register_buffer("docs_queue", torch.randn(self.effective_queue_size, 768))
@@ -158,7 +154,7 @@ class xMoCoModelPTL(pl.LightningModule):
         return positive_mlp_encodings, positive_slow_mlp_encodings, queue_mlp_encodings
 
     def training_step(self, batch, batch_idx):
-        #st = time.time()
+        st = time.time()
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
         batch_indices = batch["index"]
@@ -191,18 +187,13 @@ class xMoCoModelPTL(pl.LightningModule):
             l_neg_pl_nl = torch.matmul(code_mlp_embeddings.view((current_batch_size, -1)), torch.transpose(docs_queue_mlp_embeddings, 0, 1))
 
         else:
-            #print(f"Until else it took {time.time()-st} seconds")
-            #st = time.time()
+            print(f"Until else it took {time.time()-st} seconds")
+            st = time.time()
             # [FIND HARD NEGATIVES] (if enabled, also, this is only implemented in the non-MLP version for now)
             if args.use_hard_negatives:
-                #start_time=time.time()
-                st = time.time()
-                #metric=faiss.METRIC_INNER_PRODUCT
-                _, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)# knn(docs_embeddings.detach().cpu().numpy(),self.negative_code_numpy, self.args.hard_negative_samples, metric)## is it correct to use code_faiss here and docs_faiss below?
-                #print(f"Querying the docs FAISS index with {docs_embeddings.shape[0]} queries and k={self.args.hard_negative_samples} took {time.time()-start_time} seconds")
-                #start_time=time.time()
-                _, hard_negative_code_indices = self.docs_faiss.search(code_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)#knn(code_embeddings.detach().cpu().numpy(), self.negative_docs_numpy, self.args.hard_negative_samples, metric)#
-                print(f"Getting hard negatives on gpu {self.global_rank} took {time.time()-st} seconds")
+
+                _, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)
+                _, hard_negative_code_indices = self.docs_faiss.search(code_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)
 
                 hard_negative_docs_embeddings = torch.tensor([]).type_as(self.negative_docs_queue)
                 hard_negative_code_embeddings = torch.tensor([]).type_as(self.negative_docs_queue)
@@ -211,44 +202,6 @@ class xMoCoModelPTL(pl.LightningModule):
                     hard_negative_docs_embeddings = torch.cat((hard_negative_docs_embeddings, torch.unsqueeze(self.negative_docs_queue[indices], dim=0)), dim=0)
                 for indices in hard_negative_code_indices:
                     hard_negative_code_embeddings = torch.cat((hard_negative_code_embeddings, torch.unsqueeze(self.negative_code_queue[indices], dim=0)), dim=0)
-
-                #print(f"Querying the code FAISS index with {code_embeddings.shape[0]} queries and k={self.args.hard_negative_samples} took {time.time()-start_time} seconds")
-
-                #hard_negative_docs = {"input_ids": torch.tensor([]).type_as(code_samples["input_ids"]), "attention_mask": torch.tensor([]).type_as(code_samples["attention_mask"])}
-                #hard_negative_code = {"input_ids": torch.tensor([]).type_as(code_samples["input_ids"]), "attention_mask": torch.tensor([]).type_as(code_samples["attention_mask"])}
-
-                #start_time=time.time()
-                # concatenate all of the negative samples that we found
-                #for indices in hard_negative_docs_indices:
-                #    hard_negative_sample = self.raw_data[indices] # get a batch of size hard_negative_samples from the dataset
-                #    hard_negative_docs["input_ids"] = torch.cat((hard_negative_docs["input_ids"], hard_negative_sample["doc_input_ids"].type_as(code_samples["input_ids"])), dim=0)
-                #    hard_negative_docs["attention_mask"] = torch.cat((hard_negative_docs["attention_mask"], hard_negative_sample["doc_attention_mask"].type_as(code_samples["attention_mask"])), dim=0)
-                #print(f"Getting and concatenating all of the docs raw data from the dataset takes {time.time()-start_time} seconds")
-
-                #start_time=time.time()
-                #print(f"Until before raw_data concat it took {time.time()-st} seconds")
-                #st = time.time()
-                #for indices in hard_negative_code_indices:
-                #    hard_negative_sample = self.raw_data[indices]
-                #    hard_negative_code["input_ids"] = torch.cat((hard_negative_code["input_ids"], hard_negative_sample["code_input_ids"].type_as(code_samples["input_ids"])), dim=0)
-                #    hard_negative_code["attention_mask"] = torch.cat((hard_negative_code["attention_mask"], hard_negative_sample["code_attention_mask"].type_as(code_samples["attention_mask"])), dim=0)
-
-                #print(f"Getting and concatenating all of the code raw data from the dataset takes {time.time()-start_time} seconds")
-#                hard_negative_docs = self.raw_data[hard_negative_docs_indices].type_as(code_samples["input_ids"])
-#                hard_negative_code = self.raw_data[hard_negative_code_indices].type_as(code_samples["input_ids"])
-
-                #start_time=time.time()
-
-                # feed the hard negative samples through the fast encoder
-            
-                #hard_negative_docs_embeddings, hard_negative_code_embeddings = self.forward(hard_negative_docs, hard_negative_code, isInference=True)
-                #hard_negative_docs_embeddings = F.normalize(hard_negative_docs_embeddings, p=2, dim=1)
-                #hard_negative_code_embeddings = F.normalize(hard_negative_code_embeddings, p=2, dim=1)
-                #import IPython
-                #IPython.embed()
-
-                #print(f"Forward passes of the hard negatives and normalization takes {time.time()-start_time} seconds")
-
             # [COMPUTE LOSS DIRECTLY ON ENCODER OUTPUT]
 
             # compute similarity of positive fast_NL/slow_PL pairs
@@ -257,64 +210,30 @@ class xMoCoModelPTL(pl.LightningModule):
 
             l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
             l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
-            #print(f"Until before bmm on hard negatives it took {time.time()-st} seconds")
-            #st = time.time()
+            print(f"Until before bmm on hard negatives it took {time.time()-st} seconds")
+            st = time.time()
             if args.use_hard_negatives:
-                # print(f"Computing hard negative forward pass...")
-                # do batch matrix mulitplication
-                #start_time=time.time()
                 l_hard_neg_nl_pl = torch.bmm(hard_negative_docs_embeddings.view((current_batch_size, args.hard_negative_samples, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
                 l_hard_neg_pl_nl = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, args.hard_negative_samples, 768)), code_embeddings.view((current_batch_size, 768, 1)))
-                #print(f"BMM of hard negatives takes {time.time()-start_time} seconds")
-                #start_time=time.time()
+
                 l_hard_neg_nl_pl = torch.squeeze(l_hard_neg_nl_pl)
                 l_hard_neg_pl_nl = torch.squeeze(l_hard_neg_pl_nl)
-                #print(f"Squeeze of hard negative vectors takes {time.time()-start_time} seconds")
-                # set entries to zero (or -1) where the hard negative is actually a hard false negative (i.e. same index as query) (we need to do it this way beause we have to ensure that the rows have same length; since the entries in the FAISS index could be stale or not, either 0 or 1 entry in the nearest neighbours are identical)
-                # def batch_indices_func(sample_index):
-                #    return batch_indices[sample_index]
-                #start_time=time.time()
-                #false_negatives_list = [[1]]*8#[[index for index, x in enumerate(local_negatives) if x == batch_indices_func(sample_index)] for sample_index, local_negatives in enumerate(hard_negative_docs_indices)]
-                #for sample_index, local_negatives in enumerate(hard_negative_docs_indices):
-                #    cache_list = []
-                #    for index, x in enumerate(local_negatives):
-                #        if x==batch_indices[sample_index]:
-                #            cache_list.append(index)
-                #    false_negatives_list.append(cache_list)
-                #for index, line in enumerate(hard_negative_docs_indices):
-                #    #cache_list=[]
-                #    for subindex, elem in enumerate(line):
-                #        if elem==batch_indices[index]:
-                #            #cache_list.append(elem)
-                #            print(elem)
-                #    #false_negatives_list.append(cache_list)
 
-                
-
-                #print(f"Finding the faulty indices takes {time.time()-start_time} seconds")
-                #start_time=time.time()
-                # print("false_negatives_list generated...")
-                #for i, mask in enumerate(false_negatives_list):
-                #    l_hard_neg_nl_pl[i, mask] = -1
-                #    l_hard_neg_pl_nl[i, mask] = -1
-                #print(f"Removal of false hard negatives takes {time.time()-start_time} seconds")
-                #import IPython
-                #IPython.embed()
-        if self.args.remove_duplicates: # extremely computationally expensive
+            if self.args.remove_duplicates: # extremely computationally expensive
             # mask out any logits entry for which the queue entry is a duplicate of the positive sample
-            masking_list = []#[[target for target, index in enumerate(line) if index==pos_index] for ]#[index for index, x in enumerate(batch_indices) if x in self.code_indices]
-            for k in range(current_batch_size):
-                pos_index = batch_indices[k]
-                cache_list = []
-                for i, line in enumerate(self.docs_indices):
-                    if line==pos_index:
-                        cache_list.append(i)
-                masking_list.append(cache_list)
-            
-            # print("masking list generated...")
-            for i, mask in enumerate(masking_list):
-                l_neg_nl_pl[i, mask]=-1
-                l_neg_pl_nl[i, mask]=-1
+                masking_list = []#[[target for target, index in enumerate(line) if index==pos_index] for ]#[index for index, x in enumerate(batch_indices) if x in self.code_indices]
+                for k in range(current_batch_size):
+                    pos_index = batch_indices[k]
+                    cache_list = []
+                    for i, line in enumerate(self.docs_indices):
+                        if line==pos_index:
+                            cache_list.append(i)
+                    masking_list.append(cache_list)
+
+                # print("masking list generated...")
+                for i, mask in enumerate(masking_list):
+                    l_neg_nl_pl[i, mask]=-1
+                    l_neg_pl_nl[i, mask]=-1
 
         if args.use_hard_negatives:
             logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl, l_hard_neg_nl_pl), dim=1)
@@ -322,44 +241,26 @@ class xMoCoModelPTL(pl.LightningModule):
         else:
             logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, 1)), l_neg_nl_pl), dim=1)
             logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, 1)), l_neg_pl_nl), dim=1)
-        #print(f"Until after logits concat it took {time.time()-st}")
-        #st= time.time()
-        # labels: the entries from l_pos should always contain the smallest values
-        #st = time.time()
-        #if self.labels==None:
-        #    self.labels = torch.tensor([0]*logits_nl_pl.shape[0]).type_as(code_samples["input_ids"])
-        #print(f"Generating the labels and pushing them to the gpu takes {time.time()-st} seconds")
-        #st = time.time() 
-        
+        print(f"Until after logits concat it took {time.time()-st}")
+        st= time.time()
+
         loss_nl_pl = nn.CrossEntropyLoss()(logits_nl_pl/self.temperature, self.labels)
 
         loss_pl_nl = nn.CrossEntropyLoss()(logits_pl_nl/self.temperature, self.labels)
-        #print(f"Basic loss compuattion took {time.time()-st} seconds")
-        #import IPython
-        #IPython.embed()
-        #st = time.time()
-        
-        #print(f"Computing the separate losses takes {time.time()-st} seconds")
+        print(f"Basic loss compuattion took {time.time()-st} seconds")
+        st = time.time()
 
-        #st = time.time()
         loss = (loss_nl_pl + loss_pl_nl) / 2.0
-        #print(f"Computing average loss takes {time.time()-st} seconds")
-
-        #print(f"Loss on GPU {self.global_rank}: {loss.item()} with loss_nl_pl {loss_nl_pl.item()}, loss_pl_nl {loss_pl_nl.item()}")
 
         # [UPDATE THE QUEUES]
-        #negative_slow_docs_embeddings, negative_slow_code_embeddings = self.slow_forward(docs_samples, code_samples)
-        #st = time.time()
-        #print(f"Accumulated loss computatino took {time.time()-st} seconds")
-       
-        #st = time.time()
+        print(f"Accumulated loss computatino took {time.time()-st} seconds")
+        st = time.time()
         self.log("Loss/training", loss.item(), sync_dist=True)
-        #print(f"Logging took {time.time()-st} seconds")
-        #st= time.time()
+        print(f"Logging took {time.time()-st} seconds")
+        st= time.time()
         self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices)
         self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices)
-        #print(f"Appending to the queue takes {time.time()-st} seconds")
-        #print(f"Queue replacement took {time.time()-st} seconds")
+        print(f"Queue replacement took {time.time()-st} seconds")
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -413,7 +314,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-hard_negative_samples_{0 if not args.use_hard_negatives else args.hard_negative_samples}")
 
-    trainer = pl.Trainer(log_gpu_memory="all", gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+    trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
@@ -430,7 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", action="store_true", default=False) # note: when using dp or ddp, the value of this will be ignored and the dataset will always be shuffled (would need to make a custom DistributedSampler to prevent this)
     parser.add_argument("--augment", action="store_true", default=False)
-    parser.add_argument("--base_data_folder", type=str, default="/itet-stor/jstuder/net_scratch/nl-pl_moco/datasets/CodeSearchNet")
+    parser.add_argument("--base_data_folder", type=str, default="datasets/CodeSearchNet")
     parser.add_argument("--debug_data_skip_interval", type=int, default=100) # skips data during the loading process, which effectively makes us use a subset of the original data
     parser.add_argument("--always_use_full_val", action="store_true", default=False)
     parser.add_argument("--remove_duplicates", action="store_true", default=False)
@@ -443,9 +344,10 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="python")
     parser.add_argument("--enable_mlp", action="store_true", default=False) # it's very much possible that this will suck up an incredible amount of gpu memory depending on the queue size, so use with caution
     parser.add_argument("--use_hard_negatives", action="store_true", default=False)
-    parser.add_argument("--hard_negative_samples", type=int, default=10) # in contrast to the queue, all hard negatives need to be fed through the encoder. this is extremely expensive. the number of samples that will be fed through the encoder is gpu_local_batch_size * hard_negative_samples because there's hard_negative_samples samples per positive sample, (e.g. if gpu_local_batch_size=8 and we have 4 hard_negative_samples, then we'll feed 8*4=32 samples throught the encoder per modality)
+    parser.add_argument("--hard_negative_samples", type=int, default=4)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, hard_negative_samples={0 if not args.use_hard_negatives else args.hard_negative_samples}")
 
     execute(args)
+
