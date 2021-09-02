@@ -6,6 +6,19 @@ from math import floor
 import sys
 import time
 
+# COPIED FROM https://github.com/facebookresearch/faiss/issues/878
+def my_index_cpu_to_gpu_multiple(resources, index, co=None, gpu_nos=None):
+    vres = faiss.GpuResourcesVector()
+    vdev = faiss.IntVector()
+    if gpu_nos is None:
+        gpu_nos = range(len(resources))
+    for i, res in zip(gpu_nos, resources):
+        vdev.push_back(i)
+        vres.push_back(res)
+    index = faiss.index_cpu_to_gpu_multiple(vres, vdev, index, co)
+    index.referenced_objects = resources
+    return index
+
 
 @torch.no_grad()
 def generateHardNegativeSearchIndices(self):
@@ -42,7 +55,23 @@ def generateHardNegativeSearchIndices(self):
 
         self.negative_matrix = torch.cat((self.negative_matrix, code_gathered), dim=0)
 
+    #faiss_index_cpu = faiss.IndexFlatIP(768)
     self.faiss_index = faiss.IndexFlatIP(768)
+    #cloner_options = faiss.GpuClonerOptions()
+    #cloner_options.useFloat16=True
+
+    #config = faiss.GpuIndexFlatConfig()
+    #config.device=0
+
+    res = faiss.StandardGpuResources()
+    res.setLogMemoryAllocations(True)
+
+#    co = faiss.GpuClonerOptions()
+#    co.useFloat16 = True
+
+    #self.faiss_index = my_index_cpu_to_gpu_multiple([res], faiss_index_cpu, co=None, gpu_nos=[self.global_rank])
+    #self.faiss_index = faiss.GpuIndexFlatIP(res, 768, config)
+    #self.faiss_index = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), 0, faiss_index_cpu, cloner_options)#faiss.index_cpu_to_all_gpus(faiss_index_cpu)#my_index_cpu_to_gpu_multiple(res, faiss_index_cpu)#faiss.index_cpu_to_gpu(res, self.global_rank, faiss_index_cpu)
 
     st = time.time()
     self.faiss_index.add(self.negative_matrix.cpu().numpy())

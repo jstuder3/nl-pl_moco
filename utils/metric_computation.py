@@ -67,7 +67,7 @@ def validation_computations(self, docs_list, code_list, labels, base_path_acc, b
     # [LOG ALL GENERATED DATA]
 
     # print to console (mostly for debugging purposes)
-    print(f"Validation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
+    print(f"\nValidation {substring} MRR (on gpu {self.global_rank}): {mrr:.4f}")
     print(f"Validation {substring} top_1 accuracy (on gpu {self.global_rank}): {top_1_accuracy * 100:.3f}%")
     print(f"Validation {substring} top_5 accuracy (on gpu {self.global_rank}): {top_5_accuracy * 100:.3f}%")
     print(f"Validation {substring} top_10 accuracy (on gpu {self.global_rank}): {top_10_accuracy * 100:.3f}%")
