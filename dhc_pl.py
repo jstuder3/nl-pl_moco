@@ -36,8 +36,14 @@ class DyHardCodeModel(pl.LightningModule):
 
         self.raw_data=None
         self.negative_matrix = None
+        self.num_hard_negatives=args.num_hard_negatives
 
     def configure_optimizers(self):
+        if self.global_rank == 0:
+            # compute lowest theoretically achievable loss as a sanity check
+            # the lowest loss is achieved when the positive has value 1 (cosine similarity, identical embedding) and all others point in the opposite direction (cosine similarity of -1), assuming the matmul version of hard negatives
+            lowest_loss = -np.log(np.e/(np.e+((1+self.num_hard_negatives) * self.batch_size/self.num_gpus - 1)*np.exp(-1)))
+            print(f"Lowest theoretically achievable loss with local batch size of {self.batch_size/self.num_gpus} and {self.num_hard_negatives} hard negatives per element (assuming matmul version): {lowest_loss:.8f}")
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
         return optimizer
 
@@ -81,8 +87,8 @@ class DyHardCodeModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
 
         # update FAISS index in-epoch
-        if self.args.use_hard_negatives and batch_idx % int(ceil(self.num_batches/2)+1) == 0 and batch_idx!=0:
-            generateHardNegativeSearchIndices(self)
+        #if self.args.use_hard_negatives and batch_idx % int(ceil(self.num_batches/2)+1) == 0 and batch_idx!=0:
+        #    generateHardNegativeSearchIndices(self)
 
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
@@ -99,9 +105,9 @@ class DyHardCodeModel(pl.LightningModule):
 
         if self.args.use_hard_negatives:
             #st = time.time()
-            _, hard_negative_docs_indices = self.faiss_index.search(docs_embeddings.detach().cpu().numpy(), self.args.hard_negative_samples)
+            _, hard_negative_docs_indices = self.faiss_index.search(docs_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
             #print(f"Mining on gpu {self.global_rank} took {time.time()-st:.6f} seconds")
-            k = self.args.hard_negative_samples
+            k = self.num_hard_negatives
             #st = time.time()
             hard_negative_code_samples = {"input_ids": torch.tensor([]).type_as(code_samples["input_ids"]), "attention_mask": torch.tensor([]).type_as(code_samples["attention_mask"])}
             #hard_negative_code_samples = {"input_ids": torch.tensor([]), "attention_mask": torch.tensor([])}
@@ -123,8 +129,8 @@ class DyHardCodeModel(pl.LightningModule):
                 #print(f"Hard negative forward pass took {time.time()-st} seconds")
                 st=time.time()
             
-                hard_negative_docs_similarities = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, self.args.hard_negative_samples, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
-                #hard_negative_docs_similarities = torch.matmul(docs_embeddings, torch.transpose(hard_negative_code_embeddings, 0, 1))
+                #hard_negative_docs_similarities = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
+                hard_negative_docs_similarities = torch.matmul(docs_embeddings, torch.transpose(hard_negative_code_embeddings, 0, 1))
                 hard_negative_docs_similarities = torch.squeeze(hard_negative_docs_similarities)
             
             #print(f"BMM took {time.time()-st} seconds")
@@ -135,18 +141,18 @@ class DyHardCodeModel(pl.LightningModule):
 
             #st = time.time()
             #remove false negatives (bmm version)
-            for i in range(current_batch_size):
-                for j in range(k):
-                    if hard_negative_docs_indices[i][j] == batch_indices[i]:
-                        hard_negative_docs_similarities[i][j]=-1
+            #for i in range(current_batch_size):
+            #    for j in range(k):
+            #        if hard_negative_docs_indices[i][j] == batch_indices[i]:
+            #            hard_negative_docs_similarities[i][j]=-1
             #print(f"False negative filtering took {time.time()-st} seconds")
             
             #remove false negatives (matmul version)
-            #hard_negative_docs_indices = hard_negative_docs_indices.reshape(-1)
-            #for i in range(current_batch_size):
-            #    for j in range(hard_negative_docs_indices.shape[0]):
-            #        if hard_negative_docs_indices[j] == batch_indices[i]:
-            #            hard_negative_docs_similarities[i][j]=-1
+            hard_negative_docs_indices = hard_negative_docs_indices.reshape(-1)
+            for i in range(current_batch_size):
+                for j in range(hard_negative_docs_indices.shape[0]):
+                    if hard_negative_docs_indices[j] == batch_indices[i]:
+                        hard_negative_docs_similarities[i][j]=-1
 
             l_neg = hard_negative_docs_similarities#torch.from_numpy(hard_negative_docs_similarities).type_as(docs_embeddings)#hard_negative_docs_similarities.type_as(docs_embeddings) # this has to be of type float32
             logits = torch.cat((l_pos, l_neg), dim=1)
@@ -159,9 +165,6 @@ class DyHardCodeModel(pl.LightningModule):
         loss = nn.CrossEntropyLoss()(logits/self.temperature, labels)
 
         self.log("Loss/training", loss.item(), sync_dist=True)
-
-        import IPython
-        IPython.embed()
 
         return loss
 
@@ -213,7 +216,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-DyHardCode-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.model_name}-num_gpus_{args.num_gpus}-use_hard_negatives_{args.use_hard_negatives}-hard_negative_samples_{0 if not args.use_hard_negatives else args.hard_negative_samples}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-DyHardCode-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.model_name}-num_gpus_{args.num_gpus}-use_hard_negatives_{args.use_hard_negatives}-num_hard_negatives_{0 if not args.use_hard_negatives else args.num_hard_negatives}")
 
     trainer = pl.Trainer(log_gpu_memory="all", val_check_interval=0.5, gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 #    from pytorch_lightning.plugins import DDPPlugin
@@ -247,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--language", type=str, default="ruby")
     parser.add_argument("--use_hard_negatives", action="store_true", default=False)
-    parser.add_argument("--hard_negative_samples", type=int, default=10)
+    parser.add_argument("--num_hard_negatives", type=int, default=4)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: DyHardCode - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; disable_normalizing_encoder_embeddings_during_training={args.disable_normalizing_encoder_embeddings_during_training}; disable_mlp={args.disable_mlp}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}")
