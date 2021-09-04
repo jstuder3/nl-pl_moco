@@ -42,8 +42,9 @@ class DyHardCodeModel(pl.LightningModule):
         if self.global_rank == 0:
             # compute lowest theoretically achievable loss as a sanity check
             # the lowest loss is achieved when the positive has value 1 (cosine similarity, identical embedding) and all others point in the opposite direction (cosine similarity of -1), assuming the matmul version of hard negatives
-            lowest_loss = -np.log(np.e/(np.e+((1+self.num_hard_negatives) * self.batch_size/self.num_gpus - 1)*np.exp(-1)))
-            print(f"Lowest theoretically achievable loss with local batch size of {self.batch_size/self.num_gpus} and {self.num_hard_negatives} hard negatives per element (assuming matmul version): {lowest_loss:.8f}")
+            #lowest_loss = -np.log(np.e / (np.e + ((1 + self.num_hard_negatives) * self.batch_size / self.num_gpus - 1)*np.exp(-1)))
+            lowest_loss = -np.log(np.e / (np.e + ((self.batch_size / self.num_gpus + self.num_hard_negatives - 1) * np.exp(-1))))
+            print(f"\nLowest theoretically achievable loss with local batch size of {self.batch_size/self.num_gpus} and {self.num_hard_negatives} hard negatives per element (assuming matmul version): {lowest_loss:.8f}\n")
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
         return optimizer
 
@@ -105,13 +106,13 @@ class DyHardCodeModel(pl.LightningModule):
 
         if self.args.use_hard_negatives:
             #st = time.time()
-            _, hard_negative_docs_indices = self.faiss_index.search(docs_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
-            #print(f"Mining on gpu {self.global_rank} took {time.time()-st:.6f} seconds")
             k = self.num_hard_negatives
+            _, hard_negative_docs_indices = self.faiss_index.search(docs_embeddings.detach().cpu().numpy(), k)
+            #print(f"Mining on gpu {self.global_rank} took {time.time()-st:.6f} seconds")
+            
             #st = time.time()
             hard_negative_code_samples = {"input_ids": torch.tensor([]).type_as(code_samples["input_ids"]), "attention_mask": torch.tensor([]).type_as(code_samples["attention_mask"])}
             #hard_negative_code_samples = {"input_ids": torch.tensor([]), "attention_mask": torch.tensor([])}
-
 
             for indices in hard_negative_docs_indices:
                 hard_negative_sample = self.raw_data[indices]
@@ -128,33 +129,33 @@ class DyHardCodeModel(pl.LightningModule):
                 hard_negative_code_embeddings = F.normalize(hard_negative_code_embeddings, p=2, dim=1)
                 #print(f"Hard negative forward pass took {time.time()-st} seconds")
                 st=time.time()
-            
-                #hard_negative_docs_similarities = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
-                hard_negative_docs_similarities = torch.matmul(docs_embeddings, torch.transpose(hard_negative_code_embeddings, 0, 1))
+
+                hard_negative_docs_similarities = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
+                #hard_negative_docs_similarities = torch.matmul(docs_embeddings, torch.transpose(hard_negative_code_embeddings, 0, 1))
                 hard_negative_docs_similarities = torch.squeeze(hard_negative_docs_similarities)
-            
+
             #print(f"BMM took {time.time()-st} seconds")
-            
+
             #st = time.time()
             #hard_negative_docs_similarities=hard_negative_docs_similarities
             #print(f"Moving to CPU took {time.time()-st} seconds")
 
             #st = time.time()
             #remove false negatives (bmm version)
-            #for i in range(current_batch_size):
-            #    for j in range(k):
-            #        if hard_negative_docs_indices[i][j] == batch_indices[i]:
-            #            hard_negative_docs_similarities[i][j]=-1
-            #print(f"False negative filtering took {time.time()-st} seconds")
-            
-            #remove false negatives (matmul version)
-            hard_negative_docs_indices = hard_negative_docs_indices.reshape(-1)
             for i in range(current_batch_size):
-                for j in range(hard_negative_docs_indices.shape[0]):
-                    if hard_negative_docs_indices[j] == batch_indices[i]:
+                for j in range(k):
+                    if hard_negative_docs_indices[i][j] == batch_indices[i]:
                         hard_negative_docs_similarities[i][j]=-1
+            #print(f"False negative filtering took {time.time()-st} seconds")
 
-            l_neg = hard_negative_docs_similarities#torch.from_numpy(hard_negative_docs_similarities).type_as(docs_embeddings)#hard_negative_docs_similarities.type_as(docs_embeddings) # this has to be of type float32
+            #remove false negatives (matmul version)
+            #hard_negative_docs_indices = hard_negative_docs_indices.reshape(-1)
+            #for i in range(current_batch_size):
+            #    for j in range(hard_negative_docs_indices.shape[0]):
+            #        if hard_negative_docs_indices[j] == batch_indices[i]:
+            #            hard_negative_docs_similarities[i][j]=-1
+
+            l_neg = hard_negative_docs_similarities.view((int(self.batch_size/self.num_gpus), -1))#torch.from_numpy(hard_negative_docs_similarities).type_as(docs_embeddings)#hard_negative_docs_similarities.type_as(docs_embeddings) # this has to be of type float32
             logits = torch.cat((l_pos, l_neg), dim=1)
 
         else:
