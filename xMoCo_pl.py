@@ -42,6 +42,27 @@ class xMoCoModelPTL(pl.LightningModule):
             self.negative_code_queue = None
             self.num_hard_negatives=args.num_hard_negatives
 
+            self.hard_negative_queue_size=args.hard_negative_queue_size
+
+            if args.hard_negative_queue_size>0:
+
+                num_hard_negatives_per_iteration = self.batch_size*self.num_hard_negatives
+                assert args.hard_negative_queue_size%num_hard_negatives_per_iteration==0, "Assertion error: Hard negative queue size {args.hard_negative_queue_size} is not multiple of {self.batch_size}*{self.num_hard_negatives}={num_hard_negatives_per_iteration}" #make sure that we can't "overshoot" the shape of the queues 
+
+                # queues
+                self.register_buffer("hard_negative_docs_queue", torch.randn(self.hard_negative_queue_size, 768))
+                self.register_buffer("hard_negative_code_queue", torch.randn(self.hard_negative_queue_size, 768))
+                self.hard_negative_docs_queue = F.normalize(self.hard_negative_docs_queue, p=2, dim=1)
+                self.hard_negative_code_queue = F.normalize(self.hard_negative_code_queue, p=2, dim=1)
+
+                # index queues
+                self.register_buffer("hard_negative_docs_indices", torch.empty(self.hard_negative_queue_size).fill_(-1))
+                self.register_buffer("hard_negative_code_indices", torch.empty(self.hard_negative_queue_size).fill_(-1))
+
+                # queue index pointers
+                self.register_buffer("hard_negative_docs_current_index", torch.zeros(1, dtype=torch.long)) # the value in those will be identical, but we need both because of how I defined the replaceOldestQueueEntry function
+                self.register_buffer("hard_negative_code_current_index", torch.zeros(1, dtype=torch.long))
+
         # queues
         self.register_buffer("docs_queue", torch.randn(self.effective_queue_size, 768))
         self.register_buffer("code_queue", torch.randn(self.effective_queue_size, 768))
@@ -103,15 +124,16 @@ class xMoCoModelPTL(pl.LightningModule):
             em = self.update_weight
             param_slow.data = param_slow.data * em + param_fast.data * (1.0 - em)
 
-    def replaceOldestQueueEntry(self, queue, queue_indices, current_index, newEntry, newIndices):
-
+    def replaceOldestQueueEntry(self, queue, queue_indices, current_index, newEntry, newIndices, queue_max_size):
+        # gathers the new queue entries from all GPUs and then puts those into the local queue
         gatheredNewEntries = self.concatAllGather(newEntry)
         gatheredNewIndices = self.concatAllGather(newIndices)
 
+        megabatch_size = gatheredNewEntries.shape[0]
         pointer = int(current_index)
-        queue[pointer : pointer+self.batch_size, :] = gatheredNewEntries.detach() # the queue doesn't need the computational graph
-        queue_indices[pointer : pointer+self.batch_size] = gatheredNewIndices
-        current_index[0] = (pointer + self.batch_size) % self.effective_queue_size
+        queue[pointer : pointer+megabatch_size, :] = gatheredNewEntries.detach() # the queue doesn't need the computational graph
+        queue_indices[pointer : pointer+megabatch_size] = gatheredNewIndices
+        current_index[0] = (pointer + megabatch_size) % queue_max_size
 
     def concatAllGather(self, tensor):
         if args.accelerator=="dp":
@@ -133,12 +155,17 @@ class xMoCoModelPTL(pl.LightningModule):
         return docs_embeddings, code_embeddings
 
     def slow_forward(self, docs_samples, code_samples):
+        if not self.args.enable_training_mode_on_slow_encoders:
+            self.docs_slow_encoder.eval() # THIS IS EXPERIMENTAL! REMEMBER TO REMOVE THIS AGAIN IF IT DOES NOT HELP THE SCORE!
+            self.code_slow_encoder.eval()
+
         with torch.no_grad():
             slow_docs_embeddings = self.docs_slow_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
             slow_code_embeddings = self.code_slow_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return slow_docs_embeddings, slow_code_embeddings
 
     def training_step(self, batch, batch_idx):
+
 
         # update FAISS index in-epoch
         #if self.args.use_hard_negatives and batch_idx % int(ceil(self.num_batches/2)+1) == 0 and batch_idx!=0:
@@ -208,12 +235,13 @@ class xMoCoModelPTL(pl.LightningModule):
             #l_hard_neg_nl_pl = torch.bmm(hard_negative_docs_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
             #l_hard_neg_pl_nl = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), code_embeddings.view((current_batch_size, 768, 1)))
 
-            hard_negative_docs_embeddings, hard_negative_code_embeddings = self(hard_negative_docs_samples, hard_negative_code_samples, isInference=True)
+            #hard_negative_docs_embeddings, hard_negative_code_embeddings = self(hard_negative_docs_samples, hard_negative_code_samples, isInference=True)
+            hard_negative_docs_embeddings, hard_negative_code_embeddings = self.slow_forward(hard_negative_docs_samples, hard_negative_code_samples)
             hard_negative_docs_embeddings = F.normalize(hard_negative_docs_embeddings, p=2, dim=1)
             hard_negative_code_embeddings = F.normalize(hard_negative_code_embeddings, p=2, dim=1)
 
-            l_hard_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, 768)), torch.transpose(hard_negative_docs_embeddings.view((-1, 768)), 0, 1))
-            l_hard_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, 768)), torch.transpose(hard_negative_code_embeddings.view((-1, 768)), 0, 1))
+            l_hard_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, 768)), torch.transpose(hard_negative_code_embeddings.view((-1, 768)), 0, 1))
+            l_hard_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, 768)), torch.transpose(hard_negative_docs_embeddings.view((-1, 768)), 0, 1))
 
             l_hard_neg_nl_pl = torch.squeeze(l_hard_neg_nl_pl)
             l_hard_neg_pl_nl = torch.squeeze(l_hard_neg_pl_nl)
@@ -232,7 +260,20 @@ class xMoCoModelPTL(pl.LightningModule):
                     if hard_negative_code_indices[j] == batch_indices[i]:
                         l_hard_neg_pl_nl[i][j] = -1
 
-        #if self.args.remove_duplicates: # extremely computationally expensive
+            if self.hard_negative_queue_size > 0:
+                # compute the similarity on prevîous hard negatives (the ones held in the hard negative queue)
+                l_hard_neg_nl_pl_queue = torch.matmul(docs_embeddings.view((current_batch_size, 768)), torch.transpose(self.hard_negative_code_queue.view((-1, 768)), 0, 1))
+                l_hard_neg_pl_nl_queue = torch.matmul(code_embeddings.view((current_batch_size, 768)), torch.transpose(self.hard_negative_docs_queue.view((-1, 768)), 0, 1))
+
+                # concat results with in-batch logits
+                logits_nl_pl = torch.cat((logits_nl_pl, l_hard_neg_nl_pl_queue), dim=1)
+                logits_pl_nl = torch.cat((logits_pl_nl, l_hard_neg_pl_nl_queue), dim=1)
+
+                # update the hard negative queues
+                self.replaceOldestQueueEntry(self.hard_negative_docs_queue, self.hard_negative_docs_indices, self.hard_negative_docs_current_index, hard_negative_docs_embeddings, torch.from_numpy(hard_negative_docs_indices).view(-1).type_as(self.hard_negative_docs_current_index), self.hard_negative_queue_size)
+                self.replaceOldestQueueEntry(self.hard_negative_code_queue, self.hard_negative_code_indices, self.hard_negative_code_current_index, hard_negative_code_embeddings, torch.from_numpy(hard_negative_code_indices).view(-1).type_as(self.hard_negative_code_current_index), self.hard_negative_queue_size)
+
+        #if self.args.remove_duplicates: # extremely computationally expensive and yet practically makes no difference in performance
             # mask out any logits entry for which the queue entry is a duplicate of the positive sample
         #    masking_list = []#[[target for target, index in enumerate(line) if index==pos_index] for ]#[index for index, x in enumerate(batch_indices) if x in self.code_indices]
         #    for k in range(current_batch_size):
@@ -263,8 +304,8 @@ class xMoCoModelPTL(pl.LightningModule):
         self.log("Loss/training", loss.item(), sync_dist=True)
 
         # [UPDATE THE QUEUES]
-        self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices)
-        self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices)
+        self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices, self.effective_queue_size)
+        self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices, self.effective_queue_size)
 
         # [UPDAE THE LEARNING RATE]
         #self.lr_schedulers().step()
@@ -329,7 +370,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-num_hard_negatives_{0 if not args.use_hard_negatives else args.num_hard_negatives}")
+    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-num_hard_negatives_{0 if not args.use_hard_negatives else args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}")
 
     from pytorch_lightning.callbacks import LearningRateMonitor
     lr_monitor = LearningRateMonitor(logging_interval="step")
@@ -371,9 +412,11 @@ if __name__ == "__main__":
     parser.add_argument("--enable_mlp", action="store_true", default=False) # this currently does nothing
     parser.add_argument("--use_hard_negatives", action="store_true", default=False)
     parser.add_argument("--num_hard_negatives", type=int, default=4)
+    parser.add_argument("--hard_negative_queue_size", type=int, default=0)
+    parser.add_argument("--enable_training_mode_on_slow_encoders", action="store_true", default="False")
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, num_hard_negatives={0 if not args.use_hard_negatives else args.num_hard_negatives}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, num_hard_negatives={0 if not args.use_hard_negatives else args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}")
 
     execute(args)
 
