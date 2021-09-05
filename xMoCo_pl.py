@@ -8,13 +8,10 @@ import random
 from datetime import datetime
 import numpy as np
 
+from math import floor, ceil
+
 from utils.multimodal_data_loading import generateDataLoader
 from utils.metric_computation import validation_computations
-
-# INSTALLED FROM https://github.com/ildoonet/pytorch-gradual-warmup-lr
-from warmup_scheduler import GradualWarmupScheduler
-
-from torch.optim.lr_scheduler import StepLR
 
 class xMoCoModelPTL(pl.LightningModule):
     def __init__(self, args):
@@ -79,16 +76,11 @@ class xMoCoModelPTL(pl.LightningModule):
         # pointers to the starting index of the next block to be replaced
         self.register_buffer("docs_current_index", torch.zeros(1, dtype=torch.long))
         self.register_buffer("code_current_index", torch.zeros(1, dtype=torch.long))
-        #labels for training: generating these every time and pushing them to gpu is apparently very slow, so do it here instead
-        # self.register_buffer("labels", torch.zeros(int(self.batch_size/self.num_gpus), dtype=torch.long))
 
         self.save_hyperparameters()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.learning_rate)
-#        scheduler_steplr = StepLR(optimizer, step_size=1, gamma=np.exp(np.log(0.9)/(25000/self.batch_size))) #we want a decay of 0.9 per epoch
- #       scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=int(25000/self.batch_size), after_scheduler = scheduler_steplr) # notice the magic number for the number of total epochs
-  #      return {"optimizer": optimizer, "lr_scheduler": scheduler_warmup}
         return optimizer
 
     def load_tokenizers(self):
@@ -107,6 +99,8 @@ class xMoCoModelPTL(pl.LightningModule):
             generateHardNegativeSearchIndices(self) # need to do this before every training epoch
         else:
             train_loader = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
+
+        self.num_batches = int(floor(len(train_loader)/self.num_gpus))
 
         return train_loader
 
@@ -168,7 +162,7 @@ class xMoCoModelPTL(pl.LightningModule):
 
 
         # update FAISS index in-epoch
-        #if self.args.use_hard_negatives and batch_idx % int(ceil(self.num_batches/2)+1) == 0 and batch_idx!=0:
+        #if self.args.use_hard_negatives and batch_idx % int(ceil(self.num_batches/3)+1) == 0 and batch_idx!=0:
         #    generateHardNegativeSearchIndices(self)
 
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
@@ -199,13 +193,10 @@ class xMoCoModelPTL(pl.LightningModule):
         logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, -1)), l_neg_nl_pl), dim=1)
         logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, -1)), l_neg_pl_nl), dim=1)
 
-        # [FIND HARD NEGATIVES] (if enabled, also, this is only implemented in the non-MLP version for now)
+        # [FIND HARD NEGATIVES] (if enabled)
         if args.use_hard_negatives:
             _, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
             _, hard_negative_code_indices = self.docs_faiss.search(code_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
-
-            #hard_negative_docs_embeddings = torch.tensor([]).type_as(self.negative_docs_queue)
-            #hard_negative_code_embeddings = torch.tensor([]).type_as(self.negative_docs_queue)
 
             hard_negative_docs_samples = {"input_ids": torch.tensor([]).type_as(code_samples["input_ids"]), "attention_mask": torch.tensor([]).type_as(code_samples["attention_mask"])}
             hard_negative_code_samples = {"input_ids": torch.tensor([]).type_as(code_samples["input_ids"]), "attention_mask": torch.tensor([]).type_as(code_samples["attention_mask"])}
@@ -219,21 +210,6 @@ class xMoCoModelPTL(pl.LightningModule):
                 hard_negative_sample = self.raw_data[indices]
                 hard_negative_docs_samples["input_ids"] = torch.cat((hard_negative_docs_samples["input_ids"], hard_negative_sample["doc_input_ids"].type_as(code_samples["input_ids"])), dim=0)
                 hard_negative_docs_samples["attention_mask"] = torch.cat((hard_negative_docs_samples["attention_mask"], hard_negative_sample["doc_attention_mask"].type_as(code_samples["attention_mask"])), dim=0)
-
-            # THE APPROACH OF USING THE EMBEDDINGS COMPUTED DURING INDEX GENERATION SEEMS TO BE FAULTY! IT USES HIGHLY STALE DATA. INSTEAD, ALL OF THE FOUND NEGATIVE INDICES SHOULD BE FORWARDED THROUGH THE FAST ENCODER AND THEN MULTIPLIED WITH THE POSITIVE ENCODING
-            # Note: Forwarding is a lot more expensive than  this approach, but if we only use a couple of hard negatives per positive element, the cost should be negligible (e.g. k=3)
-            # also note that the cost of the forwarding grows really quickly in the number of harde negative sampels and batch size (i.e. O(bs*k)), but the batch/matrix multiplication for computing the actual similarities is basically free in comparison. Same thing holds for filtering false negatives. I initially thought that this would be really expensive, but it turns out it's only expensive for the queue because it is so large. it should always be applied to the hard negative similarity matrix
-
-            #for indices in hard_negative_docs_indices:
-            #    hard_negative_docs_embeddings = torch.cat((hard_negative_docs_embeddings, torch.unsqueeze(self.negative_docs_queue[indices], dim=0)), dim=0)
-            #for indices in hard_negative_code_indices:
-            #    hard_negative_code_embeddings = torch.cat((hard_negative_code_embeddings, torch.unsqueeze(self.negative_code_queue[indices], dim=0)), dim=0)
-        # [COMPUTE LOSS DIRECTLY ON ENCODER OUTPUT]
-
-        # compute similarity of positive fast_NL/slow_PL pairs
-
-            #l_hard_neg_nl_pl = torch.bmm(hard_negative_docs_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), docs_embeddings.view((current_batch_size, 768, 1)))
-            #l_hard_neg_pl_nl = torch.bmm(hard_negative_code_embeddings.view((current_batch_size, self.num_hard_negatives, 768)), code_embeddings.view((current_batch_size, 768, 1)))
 
             #hard_negative_docs_embeddings, hard_negative_code_embeddings = self(hard_negative_docs_samples, hard_negative_code_samples, isInference=True)
             hard_negative_docs_embeddings, hard_negative_code_embeddings = self.slow_forward(hard_negative_docs_samples, hard_negative_code_samples)
@@ -260,7 +236,7 @@ class xMoCoModelPTL(pl.LightningModule):
                     if hard_negative_code_indices[j] == batch_indices[i]:
                         l_hard_neg_pl_nl[i][j] = -1
 
-            if self.hard_negative_queue_size > 0:
+            if self.hard_negative_queue_size > 0: # usually makes the score worse
                 # compute the similarity on prevîous hard negatives (the ones held in the hard negative queue)
                 l_hard_neg_nl_pl_queue = torch.matmul(docs_embeddings.view((current_batch_size, 768)), torch.transpose(self.hard_negative_code_queue.view((-1, 768)), 0, 1))
                 l_hard_neg_pl_nl_queue = torch.matmul(code_embeddings.view((current_batch_size, 768)), torch.transpose(self.hard_negative_docs_queue.view((-1, 768)), 0, 1))
@@ -272,22 +248,6 @@ class xMoCoModelPTL(pl.LightningModule):
                 # update the hard negative queues
                 self.replaceOldestQueueEntry(self.hard_negative_docs_queue, self.hard_negative_docs_indices, self.hard_negative_docs_current_index, hard_negative_docs_embeddings, torch.from_numpy(hard_negative_docs_indices).view(-1).type_as(self.hard_negative_docs_current_index), self.hard_negative_queue_size)
                 self.replaceOldestQueueEntry(self.hard_negative_code_queue, self.hard_negative_code_indices, self.hard_negative_code_current_index, hard_negative_code_embeddings, torch.from_numpy(hard_negative_code_indices).view(-1).type_as(self.hard_negative_code_current_index), self.hard_negative_queue_size)
-
-        #if self.args.remove_duplicates: # extremely computationally expensive and yet practically makes no difference in performance
-            # mask out any logits entry for which the queue entry is a duplicate of the positive sample
-        #    masking_list = []#[[target for target, index in enumerate(line) if index==pos_index] for ]#[index for index, x in enumerate(batch_indices) if x in self.code_indices]
-        #    for k in range(current_batch_size):
-        #        pos_index = batch_indices[k]
-        #        cache_list = []
-        #        for i, line in enumerate(self.docs_indices):
-        #            if line==pos_index:
-        #                cache_list.append(i)
-        #        masking_list.append(cache_list)
-
-            # print("masking list generated...")
-        #    for i, mask in enumerate(masking_list):
-        #        l_neg_nl_pl[i, mask]=-1
-        #        l_neg_pl_nl[i, mask]=-1
 
             logits_nl_pl = torch.cat((logits_nl_pl, l_hard_neg_nl_pl), dim=1)
             logits_pl_nl = torch.cat((logits_pl_nl, l_hard_neg_pl_nl), dim=1)
@@ -306,9 +266,6 @@ class xMoCoModelPTL(pl.LightningModule):
         # [UPDATE THE QUEUES]
         self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices, self.effective_queue_size)
         self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices, self.effective_queue_size)
-
-        # [UPDAE THE LEARNING RATE]
-        #self.lr_schedulers().step()
 
         return loss
 
@@ -339,8 +296,9 @@ class xMoCoModelPTL(pl.LightningModule):
         local_rank = self.global_rank
 
         basis_index = docs_emb_list.shape[0]
+
         # labels are on a "shifted" diagonal
-        labels = torch.tensor([x for x in range(basis_index * local_rank, basis_index * (local_rank + 1))]).type_as(outputs[0]["docs_embeddings"])
+        labels = torch.tensor(range(basis_index * local_rank, basis_index * (local_rank + 1))).type_as(outputs[0]["docs_embeddings"])
 
         assert (docs_emb_list.shape[1] == 768)
         validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
@@ -372,17 +330,8 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-num_hard_negatives_{0 if not args.use_hard_negatives else args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}")
 
-    from pytorch_lightning.callbacks import LearningRateMonitor
-    lr_monitor = LearningRateMonitor(logging_interval="step")
-
-
     trainer = pl.Trainer(callbacks=[lr_monitor], gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
-#    from pytorch_lightning.plugins import DDPPlugin
-    #trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, reload_dataloaders_every_n_epochs=1, plugins="deepspeed_stage_2", precision=args.precision)
-    #trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, reload_dataloaders_every_n_epochs=1, plugins=DDPPlugin(find_unused_parameters=False))
-
-#    trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins)
     trainer.fit(model)
 
 if __name__ == "__main__":

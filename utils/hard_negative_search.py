@@ -13,7 +13,7 @@ def generateHardNegativeSearchIndices(self):
     # these indices can then be queried with vectors to obtain the k nearest neighbours in terms of inner product similarity (or in our case cosine similarity because the vectors are normalized)
 
     assert self.args.use_hard_negatives
-    
+
     self.negative_docs_queue = torch.tensor([]).type_as(self.docs_queue).float() #yeah, I know this is ugly
     self.negative_code_queue = torch.tensor([]).type_as(self.negative_docs_queue)
 
@@ -34,7 +34,9 @@ def generateHardNegativeSearchIndices(self):
         batch = data[start_index : start_index+batch_size]
         docs_samples = {"input_ids": batch["doc_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["doc_attention_mask"].type_as(self.docs_current_index)}
         code_samples = {"input_ids": batch["code_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["code_attention_mask"].type_as(self.docs_current_index)}
+
         docs_embeddings, code_embeddings = self.forward(docs_samples, code_samples, isInference=True)
+        #docs_embeddings, code_embeddings = self.slow_forward(docs_samples, code_samples) # need to check whether this makes any difference over using the slow encoders
 
         docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
         code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
