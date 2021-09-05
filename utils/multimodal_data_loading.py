@@ -159,7 +159,7 @@ def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, sh
     # source: code; target: nl
     data = CodeSearchNetDataset({"input_ids": all_target_ids, "attention_mask": all_target_mask}, {"input_ids": all_source_ids, "attention_mask": all_source_mask})
 
-    dataloader = DataLoader(data, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True, shuffle=shuffle, num_workers=num_workers)#, pin_memory=True) #pin_memory could be causeing insanely high loading times on large datasets
+    dataloader = DataLoader(data, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
     if args.use_hard_negatives and split=="train":
         return dataloader, data

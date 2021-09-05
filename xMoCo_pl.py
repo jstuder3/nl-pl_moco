@@ -68,7 +68,6 @@ class xMoCoModelPTL(pl.LightningModule):
         self.code_queue = F.normalize(self.code_queue, p=2, dim=1)
 
         # we actually only need one indices and current_index storage buffer, but that would make the replaceOldestQueueEntry implementation a bit nasty. Since these aren't big, I'll just keep it :P
-
         # dataset indices of the samples in the queues
         self.register_buffer("docs_indices", torch.empty(self.effective_queue_size).fill_(-1))
         self.register_buffer("code_indices", torch.empty(self.effective_queue_size).fill_(-1))
@@ -313,10 +312,10 @@ def set_seed(seed):
 
 def execute(args):
 
-    import os
-    os.environ["TOKENIZERS_PARALLELISM"]="false"
 
     if args.use_hard_negatives:
+        import os
+        os.environ["TOKENIZERS_PARALLELISM"]="false"
         os.environ["OMP_WAIT_POLICY"]="PASSIVE"
         global generateHardNegativeSearchIndices
         from utils.hard_negative_search import generateHardNegativeSearchIndices
@@ -330,7 +329,7 @@ def execute(args):
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-num_hard_negatives_{0 if not args.use_hard_negatives else args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}")
 
-    trainer = pl.Trainer(callbacks=[lr_monitor], gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+    trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
 
