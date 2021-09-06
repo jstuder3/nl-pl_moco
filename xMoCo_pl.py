@@ -2,18 +2,23 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
+from pytorch_lightning import LightningModule, Trainer, seed_everything
 import pytorch_lightning as pl
 import argparse
 import random
 from datetime import datetime
 import numpy as np
 
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
+
 from math import floor, ceil
 
 from utils.multimodal_data_loading import generateDataLoader
 from utils.metric_computation import validation_computations
 
-class xMoCoModelPTL(pl.LightningModule):
+class xMoCoModelPTL(LightningModule):
     def __init__(self, args):
         super().__init__()
         self.args = args
@@ -31,13 +36,13 @@ class xMoCoModelPTL(pl.LightningModule):
         self.batch_size = args.effective_batch_size
         self.temperature = args.temperature
         self.num_gpus = args.num_gpus
+        self.num_hard_negatives = self.args.num_hard_negatives
 
-        if args.use_hard_negatives:
+        if args.num_hard_negatives>0:#args.use_hard_negatives:
             #stuff needed for FAISS indexing
             self.raw_data=None
             self.negative_docs_queue = None
             self.negative_code_queue = None
-            self.num_hard_negatives=args.num_hard_negatives
 
             self.hard_negative_queue_size=args.hard_negative_queue_size
 
@@ -92,7 +97,7 @@ class xMoCoModelPTL(pl.LightningModule):
     def train_dataloader(self):
         self.load_tokenizers()
 
-        if self.args.use_hard_negatives:
+        if self.num_hard_negatives>0:
             train_loader, self.raw_data = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
             assert self.raw_data
             generateHardNegativeSearchIndices(self) # need to do this before every training epoch
@@ -148,8 +153,8 @@ class xMoCoModelPTL(pl.LightningModule):
         return docs_embeddings, code_embeddings
 
     def slow_forward(self, docs_samples, code_samples):
-        if not self.args.enable_training_mode_on_slow_encoders:
-            self.docs_slow_encoder.eval() # THIS IS EXPERIMENTAL! REMEMBER TO REMOVE THIS AGAIN IF IT DOES NOT HELP THE SCORE!
+        if (not self.args.enable_training_mode_on_slow_encoders) and (self.docs_slow_encoder.training or self.code_slow_encoder.training):
+            self.docs_slow_encoder.eval() # permanently putting the slow encoders into evaluation mode drastically improves the score. it is important to only call .eval() if the model isn't already in evaluation mode, as this is is a fairly expensive operation when called several times per iteration
             self.code_slow_encoder.eval()
 
         with torch.no_grad():
@@ -161,7 +166,7 @@ class xMoCoModelPTL(pl.LightningModule):
 
 
         # update FAISS index in-epoch
-        #if self.args.use_hard_negatives and batch_idx % int(ceil(self.num_batches/3)+1) == 0 and batch_idx!=0:
+        #if self.args.num_hard_negatives>0 and batch_idx % int(ceil(self.num_batches/3)+1) == 0 and batch_idx!=0:
         #    generateHardNegativeSearchIndices(self)
 
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
@@ -193,7 +198,7 @@ class xMoCoModelPTL(pl.LightningModule):
         logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, -1)), l_neg_pl_nl), dim=1)
 
         # [FIND HARD NEGATIVES] (if enabled)
-        if args.use_hard_negatives:
+        if self.num_hard_negatives>0:
             _, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
             _, hard_negative_code_indices = self.docs_faiss.search(code_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
 
@@ -302,18 +307,49 @@ class xMoCoModelPTL(pl.LightningModule):
         assert (docs_emb_list.shape[1] == 768)
         validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
 
-# COPIED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/codesearch/run_classifier.py#L45
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed) # I don't use numpy, but some library I use here might use numpy as a backend
-    torch.manual_seed(seed)
-    if torch.cuda.device_count() > 0:
-        torch.cuda.manual_seed_all(seed)
+    def test_step(self, batch, batch_idx):
+        if  self.docs_fast_encoder.training or self.code_fast_encoder.training: #apparently PTL doesn't do that automatically when testing
+            self.docs_fast_encoder.eval()
+            self.code_fast_encoder.eval()
+
+        docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
+        code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
+
+        docs_embeddings, code_embeddings = self(docs_samples, code_samples, isInference=True)
+
+        docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
+        code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
+
+        return {"index": batch["index"].view(-1), "docs_embeddings": docs_embeddings, "code_embeddings": code_embeddings}
+
+
+    def test_step_end(self, batch_parts):
+        return batch_parts
+
+    def test_epoch_end(self, outputs):
+        code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
+        docs_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
+
+        for output in outputs:
+            code_emb_list = torch.cat((code_emb_list, output["code_embeddings"]), dim=0)
+            docs_emb_list = torch.cat((docs_emb_list, output["docs_embeddings"]), dim=0)
+
+        code_emb_list = self.concatAllGather(code_emb_list)
+
+        local_rank = self.global_rank
+
+        basis_index = docs_emb_list.shape[0]
+
+        # labels are on a "shifted" diagonal
+        labels = torch.tensor(range(basis_index * local_rank, basis_index * (local_rank + 1))).type_as(outputs[0]["docs_embeddings"])
+
+        assert (docs_emb_list.shape[1] == 768)
+        validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/TEST", "Similarity_TEST", substring="ENC")
 
 def execute(args):
 
 
-    if args.use_hard_negatives:
+    if args.num_hard_negatives>0:
         import os
         os.environ["TOKENIZERS_PARALLELISM"]="false"
         os.environ["OMP_WAIT_POLICY"]="PASSIVE"
@@ -321,17 +357,41 @@ def execute(args):
         from utils.hard_negative_search import generateHardNegativeSearchIndices
 
     # set all seeds so we can ensure same MLP initialization and augmentation behaviour on all GPUS
-    set_seed(args.seed)
+    seed_everything(args.seed, workers=False)
 
     model = xMoCoModelPTL(args)
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = pl.loggers.TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.use_hard_negatives}-num_hard_negatives_{0 if not args.use_hard_negatives else args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}")
+    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}")
 
-    trainer = pl.Trainer(gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=1, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+    early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
+    checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
+
+    callbacks=[checkpoint_callback, early_stopping_callback]
+    callbacks=callbacks
+
+    trainer = Trainer(callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=(1 if (args.augment or args.num_hard_negatives>0) else 0), accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
     trainer.fit(model)
+
+    print(f"Training done. Best checkpoint: {checkpoint_callback.best_model_path} with validation MRR {checkpoint_callback.best_model_score}")
+
+    if args.do_test: #note: currently, this will crash the program because the folder somehow doesn't get generated; will need to fix this later
+        # load best checkpoint
+        model = xMoCoModelPTL.load_from_checkpoint(checkpoint_callback.best_model_path)
+
+        # generate test set by combining the validation and test set
+        docs_tokenizer = AutoTokenizer.from_pretrained(args.docs_encoder)
+        code_tokenizer = AutoTokenizer.from_pretrained(args.code_encoder)
+
+        val_dataloader = generateDataLoader(args.language, "valid", docs_tokenizer, code_tokenizer, args, shuffle=False, augment=False, num_workers=args.num_workers)
+        test_dataloader = generateDataLoader(args.language, "test", docs_tokenizer, code_tokenizer, args, shuffle=False, augment=False, num_workers=args.num_workers)
+
+        dataloaders_list = [val_dataloader, test_dataloader]
+
+        # run the actual tests
+        trainer.test(model=model, dataloaders=dataloaders_list) # this SHOULD use ddp and multiple GPUs. If not, I will need to change a lot of stuff about the test loop...
 
 if __name__ == "__main__":
     # [PARSE ARGUMENTS] (if they are given, otherwise keep default value)
@@ -339,10 +399,10 @@ if __name__ == "__main__":
     parser.add_argument("--docs_encoder", type=str, default="microsoft/codebert-base")
     parser.add_argument("--code_encoder", type=str, default="microsoft/codebert-base")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--effective_batch_size", type=int, default=2)
+    parser.add_argument("--effective_batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--effective_queue_size", type=int, default=128)
+    parser.add_argument("--effective_queue_size", type=int, default=4096)
     parser.add_argument("--momentum_update_weight", type=float, default=0.999)
     parser.add_argument("--shuffle", action="store_true", default=False) # note: when using dp or ddp, the value of this will be ignored and the dataset will always be shuffled (would need to make a custom DistributedSampler to prevent this)
     parser.add_argument("--augment", action="store_true", default=False)
@@ -358,13 +418,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--language", type=str, default="ruby")
     parser.add_argument("--enable_mlp", action="store_true", default=False) # this currently does nothing
-    parser.add_argument("--use_hard_negatives", action="store_true", default=False)
     parser.add_argument("--num_hard_negatives", type=int, default=4)
     parser.add_argument("--hard_negative_queue_size", type=int, default=0)
     parser.add_argument("--enable_training_mode_on_slow_encoders", action="store_true", default="False")
+    parser.add_argument("--do_test", action="store_true", default="False")
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.use_hard_negatives}, num_hard_negatives={0 if not args.use_hard_negatives else args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}")
 
     execute(args)
 

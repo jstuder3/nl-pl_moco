@@ -128,7 +128,7 @@ def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, sh
 
     #load, preprocess, augment and tokenize data
 
-    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args, ignore_debug=(True if (split=="valid" and args.always_use_full_val) else False))
+    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args, ignore_debug=(True if (split=="train" or (split=="valid" and args.always_use_full_val)) else False))
 
     if augment:
         for i in range(len(examples)):
@@ -161,7 +161,7 @@ def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, sh
 
     dataloader = DataLoader(data, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
-    if args.use_hard_negatives and split=="train":
+    if args.num_hard_negatives>0 and split=="train":
         return dataloader, data
     else:
         return dataloader

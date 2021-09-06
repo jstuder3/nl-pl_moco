@@ -12,7 +12,7 @@ def generateHardNegativeSearchIndices(self):
     # this function should generate two separate FAISS indices: one for the docs samples and one for the code samples.
     # these indices can then be queried with vectors to obtain the k nearest neighbours in terms of inner product similarity (or in our case cosine similarity because the vectors are normalized)
 
-    assert self.args.use_hard_negatives
+    assert self.args.num_hard_negatives>0
 
     self.negative_docs_queue = torch.tensor([]).type_as(self.docs_queue).float() #yeah, I know this is ugly
     self.negative_code_queue = torch.tensor([]).type_as(self.negative_docs_queue)
