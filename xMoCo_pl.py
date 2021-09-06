@@ -369,7 +369,6 @@ def execute(args):
     checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
 
     callbacks=[checkpoint_callback, early_stopping_callback]
-    callbacks=callbacks
 
     trainer = Trainer(callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=(1 if (args.augment or args.num_hard_negatives>0) else 0), accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 

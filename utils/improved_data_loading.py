@@ -128,7 +128,7 @@ def generateDataLoader(language, split, tokenizer, args, batch_size=1, shuffle=F
 
     #load, preprocess, augment and tokenize data
 
-    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args, ignore_debug=(True if (split=="valid" and args.always_use_full_val) else False))
+    examples = read_examples(f"{args.base_data_folder}/{language}/{split}.jsonl", args, ignore_debug=(True if (split=="test" or (split=="valid" and args.always_use_full_val)) else False))
 
     if augment:
         for i in range(len(examples)):
