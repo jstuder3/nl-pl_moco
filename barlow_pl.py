@@ -60,7 +60,7 @@ class BarlowTwinsPTL(LightningModule):
 
     def val_dataloader(self):
         self.load_tokenizer()
-        val_dataloader = generateDataLoader(self.args.language, "validate", self.tokenizer, self.args, batch_size=int(self.batch_size/self.num_gpus), shuffle=False, augment=False, num_workers=self.args.num_workers)
+        val_dataloader = generateDataLoader(self.args.language, "valid", self.tokenizer, self.args, batch_size=int(self.batch_size/self.num_gpus), shuffle=False, augment=False, num_workers=self.args.num_workers)
         return val_dataloader
 
     def concatAllGather(self, tensor):
@@ -101,13 +101,21 @@ class BarlowTwinsPTL(LightningModule):
         c = torch.matmul(docs_norm.T, code_norm) # found a simpler way than torch.transpose: just use tensor.T
 
         D = c.shape[0]
-        c_diff = (c-torch.eye(D)).pow(2)
+        c_diff = (c-torch.eye(D).type_as(c)).pow(2)
 
-        diagonal_indices = [i*D+i for i in range(D)]
-        off_diagonal_indices = [x for x in range(D**2) if x not in diagonal_indices]
+        # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
+        #topleft = torch.clone(c_diff[0][0])
+        #other = torch.clone(c_diff[0][1])
+        diagonal_matrix=torch.diag(torch.diag(c_diff)) # remove all off-diagonal elements
+        mask = torch.eye(D, D).type_as(c).bool()
+        c_diff=c_diff.masked_fill(mask, 0)*self.lambd+diagonal_matrix
 
-        # multiply off-diagonal elements by lambda
-        c_diff.view(-1)[off_diagonal_indices]*=self.lambd
+        #sanity check:
+        #try:
+        #    assert c_diff[0][0]==topleft and c_diff[0][1]==other*self.lambd, "Assertion error: you made an oopsie doopsie"
+        #except:
+        #    import IPython
+        #    IPython.embed()
 
         loss = c_diff.sum()
 
@@ -129,13 +137,22 @@ class BarlowTwinsPTL(LightningModule):
         c = torch.matmul(docs_norm.T, code_norm)  # found a simpler way than torch.transpose: just use tensor.T
 
         D = c.shape[0]
-        c_diff = (c - torch.eye(D)).pow(2)
+        c_diff = (c - torch.eye(D).type_as(c)).pow(2)
 
-        diagonal_indices = [i * D + i for i in range(D)]
-        off_diagonal_indices = [x for x in range(D ** 2) if x not in diagonal_indices]
+        #diagonal_indices = [i * D + i for i in range(D)]
+        #off_diagonal_indices = [x for x in range(D ** 2) if x not in diagonal_indices]
 
         # multiply off-diagonal elements by lambda
-        c_diff.view(-1)[off_diagonal_indices] *= self.lambd
+
+        # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
+        #topleft = torch.clone(c_diff[0][0])
+        #other = torch.clone(c_diff[0][1])
+        diagonal_matrix=torch.diag(torch.diag(c_diff)) # remove all off-diagonal elements
+        mask = torch.eye(D, D).type_as(c).bool()
+        c_diff=c_diff.masked_fill(mask, 0)*self.lambd+diagonal_matrix
+
+        #sanity check:
+        #assert c_diff[0][0]==topleft and c_diff[0][1]==other*self.lambd, "Assertion error: you made an oopsie doopsie"
 
         loss = c_diff.sum()
 
@@ -144,6 +161,9 @@ class BarlowTwinsPTL(LightningModule):
 def execute(args):
 
     seed_everything(args.seed, workers=False)
+
+    import os
+    os.environ["TOKENIZERS_PARALLELISM"]="false"
 
     model = BarlowTwinsPTL(args)
 
@@ -164,7 +184,7 @@ def execute(args):
 
     callbacks = [early_stopping_callback, checkpoint_callback]
 
-    trainer = Trainer(callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs,
+    trainer = Trainer(log_gpu_memory="all", callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs,
                       logger=logger, reload_dataloaders_every_n_epochs=1,
                       accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
