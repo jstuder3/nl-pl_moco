@@ -35,8 +35,8 @@ def generateHardNegativeSearchIndices(self):
         docs_samples = {"input_ids": batch["doc_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["doc_attention_mask"].type_as(self.docs_current_index)}
         code_samples = {"input_ids": batch["code_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["code_attention_mask"].type_as(self.docs_current_index)}
 
-        docs_embeddings, code_embeddings = self.forward(docs_samples, code_samples, isInference=True)
-        #docs_embeddings, code_embeddings = self.slow_forward(docs_samples, code_samples) # need to check whether this makes any difference over using the slow encoders
+        #docs_embeddings, code_embeddings = self.forward(docs_samples, code_samples, isInference=True)
+        docs_embeddings, code_embeddings = self.slow_forward(docs_samples, code_samples) # need to check whether this makes any difference over using the slow encoders
 
         docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
         code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
