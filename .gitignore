@@ -3,3 +3,4 @@ datasets/*
 runs/*
 .idea/*
 *.pyc
+faiss_fiddle.py
