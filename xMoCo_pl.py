@@ -30,7 +30,8 @@ class xMoCoModelPTL(LightningModule):
         self.docs_slow_encoder = AutoModel.from_pretrained(args.docs_encoder)
         self.code_fast_encoder = AutoModel.from_pretrained(args.code_encoder)
         self.code_slow_encoder = AutoModel.from_pretrained(args.code_encoder)
-        
+
+        self.use_barlow_loss=args.use_barlow_loss
         if args.use_barlow_loss:
             pd = args.barlow_projector_dimension
             self.docs_projector = nn.Sequential(
@@ -51,7 +52,7 @@ class xMoCoModelPTL(LightningModule):
                 nn.ReLU(),
                 nn.Linear(pd, pd)
             )
-            self.lambd = args.barlow_lambda
+            self.barlow_lambda = args.barlow_lambda
             self.barlow_weight = args.barlow_weight
 
         self.effective_queue_size = args.effective_queue_size
@@ -203,12 +204,12 @@ class xMoCoModelPTL(LightningModule):
         c_diff = (c-torch.eye(D).type(as_c)).pow(2)
 
         topleft = torch.clone(c_diff[0][0])
-        other = torch.clone(c_diff[0][1])*self.lambd
+        other = torch.clone(c_diff[0][1])*self.barlow_lambda
 
         # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
         diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
         mask = torch.eye(D, D).type_as(c).bool()
-        c_diff = c_diff.masked_fill(mask, 0)*self.lambd+diagonal_matrix
+        c_diff = c_diff.masked_fill(mask, 0)*self.barlow_lambda+diagonal_matrix
 
         #sanity check:
         try:
@@ -217,11 +218,11 @@ class xMoCoModelPTL(LightningModule):
             import IPython
             IPython.embed()
 
-       loss = c_diff.sum()*self.barlow_weight
+        loss = c_diff.sum()*self.barlow_weight
 
-       self.log("Loss/barlow", loss.item()
+        self.log("Loss/barlow", loss.item(), sync_dist=True)
 
-       return loss
+        return loss
 
     def training_step(self, batch, batch_idx):
 
@@ -435,7 +436,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}-use_barlow_{args.use_barlow_loss}-barl_pd_{args.barlow_projector_dimension}-barl_lambd_{self.barlow_lambda}-barl_weight_{self.barlow_weight}")
+    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}-use_barlow_{args.use_barlow_loss}-barl_pd_{args.barlow_projector_dimension}-barl_lambd_{args.barlow_lambda}-barl_weight_{args.barlow_weight}")
 
     early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
     checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
@@ -499,7 +500,7 @@ if __name__ == "__main__":
     parser.add_argument("--do_test", action="store_true", default=False)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}, use_barlow_loss={args.use_barlow_loss}, barlow_projector_dimension={args.barlow_projector_dimension}, barlow_lambda={self.barlow_lambda}, barlow_weight={self.barlow_weight}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}, use_barlow_loss={args.use_barlow_loss}, barlow_projector_dimension={args.barlow_projector_dimension}, barlow_lambda={args.barlow_lambda}, barlow_weight={args.barlow_weight}")
 
     execute(args)
 
