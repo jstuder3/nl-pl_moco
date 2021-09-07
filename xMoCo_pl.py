@@ -30,6 +30,29 @@ class xMoCoModelPTL(LightningModule):
         self.docs_slow_encoder = AutoModel.from_pretrained(args.docs_encoder)
         self.code_fast_encoder = AutoModel.from_pretrained(args.code_encoder)
         self.code_slow_encoder = AutoModel.from_pretrained(args.code_encoder)
+        
+        if args.use_barlow_loss:
+            pd = args.barlow_projector_dimension
+            self.docs_projector = nn.Sequential(
+                nn.Linear(768, pd),
+                nn.BatchNorm1d(pd),
+                nn.ReLU(),
+                nn.Linear(pd, pd),
+                nn.BatchNorm1d(pd),
+                nn.ReLU(),
+                nn.Linear(pd, pd)
+            )
+            self.code_projector = nn.Sequential(
+                nn.Linear(768, pd),
+                nn.BatchNorm1d(pd),
+                nn.ReLU(),
+                nn.Linear(pd, pd),
+                nn.BatchNorm1d(pd),
+                nn.ReLU(),
+                nn.Linear(pd, pd)
+            )
+            self.lambd = args.barlow_lambda
+            self.barlow_weight = args.barlow_weight
 
         self.effective_queue_size = args.effective_queue_size
         self.update_weight = args.momentum_update_weight
@@ -122,6 +145,7 @@ class xMoCoModelPTL(LightningModule):
             em = self.update_weight
             param_slow.data = param_slow.data * em + param_fast.data * (1.0 - em)
 
+    @torch.no_grad()
     def replaceOldestQueueEntry(self, queue, queue_indices, current_index, newEntry, newIndices, queue_max_size):
         # gathers the new queue entries from all GPUs and then puts those into the local queue
         gatheredNewEntries = self.concatAllGather(newEntry)
@@ -133,6 +157,7 @@ class xMoCoModelPTL(LightningModule):
         queue_indices[pointer : pointer+megabatch_size] = gatheredNewIndices
         current_index[0] = (pointer + megabatch_size) % queue_max_size
 
+    @torch.no_grad()
     def concatAllGather(self, tensor):
         if args.accelerator=="dp":
             return tensor
@@ -152,6 +177,7 @@ class xMoCoModelPTL(LightningModule):
                 code_embeddings = self.code_fast_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return docs_embeddings, code_embeddings
 
+    @torch.no_grad()
     def slow_forward(self, docs_samples, code_samples):
         if (not self.args.enable_training_mode_on_slow_encoders) and (self.docs_slow_encoder.training or self.code_slow_encoder.training):
             self.docs_slow_encoder.eval() # permanently putting the slow encoders into evaluation mode drastically improves the score. it is important to only call .eval() if the model isn't already in evaluation mode, as this is is a fairly expensive operation when called several times per iteration
@@ -161,6 +187,41 @@ class xMoCoModelPTL(LightningModule):
             slow_docs_embeddings = self.docs_slow_encoder(input_ids=docs_samples["input_ids"], attention_mask=docs_samples["attention_mask"])["pooler_output"]
             slow_code_embeddings = self.code_slow_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return slow_docs_embeddings, slow_code_embeddings
+
+    def barlow_computations(self, docs_representations, code_representations):
+        # projector network forward
+        docs_embeddings = self.docs_projector(docs_representations)
+        code_embeddings = self.code_projector(code_representations)
+
+        # barlow loss computation
+        docs_norm = (docs_embeddings - torch.mean(docs_embeddings, dim=0)) / torch.std(docs_embeddings, dim=0)
+        code_norm = (code_embeddings - torch.mean(code_embeddings, dim=0)) / torch.std(code_embeddings, dim=0)
+
+        c = torch.matmul(docs_norm.T, code_norm)
+
+        D=c.shape[0]
+        c_diff = (c-torch.eye(D).type(as_c)).pow(2)
+
+        topleft = torch.clone(c_diff[0][0])
+        other = torch.clone(c_diff[0][1])*self.lambd
+
+        # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
+        diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
+        mask = torch.eye(D, D).type_as(c).bool()
+        c_diff = c_diff.masked_fill(mask, 0)*self.lambd+diagonal_matrix
+
+        #sanity check:
+        try:
+            assert c_diff[0][0]==topleft and c_diff[0][1]==other, "Assertion error: CC matrix faulty: " + (f"c[0][0]={c[0][0]}, should be {topleft}" if c[0][0]!=topleft else "") + (f"c[0][1]={c[0][1]}, should be {other}" if c[0][1]!=other else "")
+        except:
+            import IPython
+            IPython.embed()
+
+       loss = c_diff.sum()*self.barlow_weight
+
+       self.log("Loss/barlow", loss.item()
+
+       return loss
 
     def training_step(self, batch, batch_idx):
 
@@ -262,10 +323,17 @@ class xMoCoModelPTL(LightningModule):
 
         loss_pl_nl = nn.CrossEntropyLoss()(logits_pl_nl/self.temperature, labels)
 
-        loss = (loss_nl_pl + loss_pl_nl) / 2.0
+        loss_contrast = (loss_nl_pl + loss_pl_nl) / 2.0
+
+        loss = loss_contrast
+
+        if self.use_barlow_loss:
+            loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
+            loss=loss_contrast+loss_barlow
 
         # [LOGGING]
-        self.log("Loss/training", loss.item(), sync_dist=True)
+        self.log("Loss/contrast", loss_contrast.item(), sync_dist=True)
+        self.log("Loss/combined", loss.item(), sync_dist=True)
 
         # [UPDATE THE QUEUES]
         self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices, self.effective_queue_size)
@@ -273,6 +341,7 @@ class xMoCoModelPTL(LightningModule):
 
         return loss
 
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         docs_samples = {"input_ids": batch["doc_input_ids"], "attention_mask": batch["doc_attention_mask"]}
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
@@ -284,9 +353,11 @@ class xMoCoModelPTL(LightningModule):
 
         return {"index": batch["index"].view(-1), "docs_embeddings": docs_embeddings, "code_embeddings": code_embeddings}
 
+    @torch.no_grad()
     def validation_step_end(self, batch_parts): # I know this seems unnecessary at first glance, but the original function would only return the very first entry of every tensor in the dictionary. But we need all entries
         return batch_parts
 
+    @torch.no_grad()
     def validation_epoch_end(self, outputs):
         code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         docs_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
@@ -307,6 +378,7 @@ class xMoCoModelPTL(LightningModule):
         assert (docs_emb_list.shape[1] == 768)
         validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
 
+    @torch.no_grad()
     def test_step(self, batch, batch_idx):
         if  self.docs_fast_encoder.training or self.code_fast_encoder.training: #apparently PTL doesn't do that automatically when testing
             self.docs_fast_encoder.eval()
@@ -322,10 +394,11 @@ class xMoCoModelPTL(LightningModule):
 
         return {"index": batch["index"].view(-1), "docs_embeddings": docs_embeddings, "code_embeddings": code_embeddings}
 
-
+    @torch.no_grad()
     def test_step_end(self, batch_parts):
         return batch_parts
 
+    @torch.no_grad()
     def test_epoch_end(self, outputs):
         code_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
         docs_emb_list = torch.tensor([]).type_as(outputs[0]["docs_embeddings"])
@@ -348,7 +421,6 @@ class xMoCoModelPTL(LightningModule):
 
 def execute(args):
 
-
     if args.num_hard_negatives>0:
         import os
         os.environ["TOKENIZERS_PARALLELISM"]="false"
@@ -363,7 +435,7 @@ def execute(args):
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}")
+    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}-use_barlow_{args.use_barlow_loss}-barl_pd_{args.barlow_projector_dimension}-barl_lambd_{self.barlow_lambda}-barl_weight_{self.barlow_weight}")
 
     early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
     checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
@@ -419,11 +491,15 @@ if __name__ == "__main__":
     parser.add_argument("--enable_mlp", action="store_true", default=False) # this currently does nothing
     parser.add_argument("--num_hard_negatives", type=int, default=4)
     parser.add_argument("--hard_negative_queue_size", type=int, default=0)
-    parser.add_argument("--enable_training_mode_on_slow_encoders", action="store_true", default="False")
-    parser.add_argument("--do_test", action="store_true", default="False")
+    parser.add_argument("--enable_training_mode_on_slow_encoders", action="store_true", default=False)
+    parser.add_argument("--use_barlow_loss", action="store_true", default=False)
+    parser.add_argument("--barlow_projector_dimension", type=int, default=2048)
+    parser.add_argument("--barlow_lambda", type=float, default=0.005)
+    parser.add_argument("--barlow_weight", type=float, default=0.001)
+    parser.add_argument("--do_test", action="store_true", default=False)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}, use_barlow_loss={args.use_barlow_loss}, barlow_projector_dimension={args.barlow_projector_dimension}, barlow_lambda={self.barlow_lambda}, barlow_weight={self.barlow_weight}")
 
     execute(args)
 
