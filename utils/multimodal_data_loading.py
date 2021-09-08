@@ -122,7 +122,7 @@ def convert_examples_to_features(examples, docs_tokenizer, code_tokenizer, stage
     return features
 
 # ADAPTED FROM https://github.com/microsoft/CodeBERT/blob/master/CodeBERT/code2nl/run.py
-def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, shuffle=False, augment=False, num_workers=0):
+def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, shuffle=False, augment=False, num_workers=0, return_raw=False):
     # we may want to augment several times independently and reloading the original data every time
     # is the only way I could find to make sure we start from the original data every time (Datasets have no copy method)
 
@@ -161,7 +161,7 @@ def generateDataLoader(language, split, docs_tokenizer, code_tokenizer, args, sh
 
     dataloader = DataLoader(data, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True, shuffle=shuffle, num_workers=num_workers)
 
-    if args.num_hard_negatives>0 and split=="train":
+    if (args.num_hard_negatives>0 and split=="train") or return_raw:
         return dataloader, data
     else:
         return dataloader
