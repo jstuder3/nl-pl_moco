@@ -17,6 +17,7 @@ from math import floor, ceil
 
 from utils.multimodal_data_loading import generateDataLoader
 from utils.metric_computation import validation_computations
+from utils.codeSearchNetDataset import CodeSearchNetDataset
 
 class xMoCoModelPTL(LightningModule):
     def __init__(self, args):
@@ -61,10 +62,14 @@ class xMoCoModelPTL(LightningModule):
         self.temperature = args.temperature
         self.num_gpus = args.num_gpus
         self.num_hard_negatives = self.args.num_hard_negatives
+        self.augment=args.augment
+
+        self.train_loader=None
+        self.val_loader=None
+        self.raw_data=None
 
         if args.num_hard_negatives>0:#args.use_hard_negatives:
             #stuff needed for FAISS indexing
-            self.raw_data=None
             self.negative_docs_queue = None
             self.negative_code_queue = None
 
@@ -122,21 +127,45 @@ class xMoCoModelPTL(LightningModule):
         self.load_tokenizers()
 
         if self.num_hard_negatives>0:
-            train_loader, self.raw_data = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
-            assert self.raw_data
-            generateHardNegativeSearchIndices(self) # need to do this before every training epoch
+            if self.augment or (self.train_loader==None or self.raw_data==None):
+                self.train_loader, self.raw_data = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.augment, num_workers=self.args.num_workers)
+                assert self.raw_data
+            generateHardNegativeSearchIndices(self) # need to update the index before every training epoch, regardless of whether we reloaded the data or not
         else:
-            train_loader = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.args.augment, num_workers=self.args.num_workers)
+            if self.augment or self.train_loader==None:
+                self.train_loader = generateDataLoader(self.args.language, "train", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=self.args.shuffle, augment=self.augment, num_workers=self.args.num_workers)
 
-        self.num_batches = int(floor(len(train_loader)/self.num_gpus))
+        self.num_batches = int(floor(len(self.train_loader)/self.num_gpus))
 
-        return train_loader
+        return self.train_loader
 
     @torch.no_grad()
     def val_dataloader(self):
-        self.load_tokenizers()
-        self.val_loader = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers)
+        if self.val_loader==None: # prevent unnecessary validation set reloads by re-using the validation loader
+            self.load_tokenizers()
+            self.val_loader = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers)
         return self.val_loader
+
+    @torch.no_grad()
+    def test_dataloader(self):
+        self.load_tokenizers()
+        # hacky workaround for concatenating two datasets while ensuring that they have the right indices (pytorch's ConcatDataset starts the index at 0 in the second dataset)
+        _, raw_data1 = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
+        _, raw_data2 = generateDataLoader(self.args.language, "test", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
+
+        docs_input_ids = torch.cat((raw_data1.doc_tokens["input_ids"], raw_data2.doc_tokens["input_ids"]), dim=0)
+        docs_attention_mask = torch.cat((raw_data1.doc_tokens["attention_mask"], raw_data2.doc_tokens["attention_mask"]), dim=0)
+        code_input_ids = torch.cat((raw_data1.code_tokens["input_ids"], raw_data2.code_tokens["input_ids"]), dim=0)
+        code_attention_mask = torch.cat((raw_data1.code_tokens["attention_mask"], raw_data2.code_tokens["attention_mask"]), dim=0)
+
+        concat_docs = {"input_ids": docs_input_ids, "attention_mask": docs_attention_mask}
+        concat_code = {"input_ids": code_input_ids, "attention_mask": code_attention_mask}
+
+        concat_dataset = CodeSearchNetDataset(concat_docs, concat_code)
+
+        test_dataloader = torch.utils.data.DataLoader(concat_dataset, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True)
+
+        return test_dataloader
 
     # ADAPTED FROM https://github.com/PyTorchLightning/lightning-bolts/blob/master/pl_bolts/models/self_supervised/moco/moco2_module.py#L137
     @torch.no_grad()
@@ -190,6 +219,8 @@ class xMoCoModelPTL(LightningModule):
         return slow_docs_embeddings, slow_code_embeddings
 
     def barlow_computations(self, docs_representations, code_representations):
+        # NOTE: COMPLETELY UNTESTED
+
         # projector network forward
         docs_embeddings = self.docs_projector(docs_representations)
         code_embeddings = self.code_projector(code_representations)
@@ -250,14 +281,14 @@ class xMoCoModelPTL(LightningModule):
         positive_slow_docs_embeddings = F.normalize(positive_slow_docs_embeddings, p=2, dim=1)
         positive_slow_code_embeddings = F.normalize(positive_slow_code_embeddings, p=2, dim=1)
 
-        l_pos_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(positive_slow_code_embeddings, 0, 1))
-        l_pos_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(positive_slow_docs_embeddings, 0, 1))
+        l_pos_nl_pl = torch.matmul(docs_embeddings, positive_slow_code_embeddings.T)
+        l_pos_pl_nl = torch.matmul(code_embeddings, positive_slow_docs_embeddings.T)
 
-        l_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, -1)), torch.transpose(self.code_queue, 0, 1))
-        l_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, -1)), torch.transpose(self.docs_queue, 0, 1))
+        l_neg_nl_pl = torch.matmul(docs_embeddings, self.code_queue.T)
+        l_neg_pl_nl = torch.matmul(code_embeddings, self.docs_queue.T)
 
-        logits_nl_pl = torch.cat((l_pos_nl_pl.view((current_batch_size, -1)), l_neg_nl_pl), dim=1)
-        logits_pl_nl = torch.cat((l_pos_pl_nl.view((current_batch_size, -1)), l_neg_pl_nl), dim=1)
+        logits_nl_pl = torch.cat((l_pos_nl_pl, l_neg_nl_pl), dim=1)
+        logits_pl_nl = torch.cat((l_pos_pl_nl, l_neg_pl_nl), dim=1)
 
         # [FIND HARD NEGATIVES] (if enabled)
         if self.num_hard_negatives>0:
@@ -282,8 +313,8 @@ class xMoCoModelPTL(LightningModule):
             hard_negative_docs_embeddings = F.normalize(hard_negative_docs_embeddings, p=2, dim=1)
             hard_negative_code_embeddings = F.normalize(hard_negative_code_embeddings, p=2, dim=1)
 
-            l_hard_neg_nl_pl = torch.matmul(docs_embeddings.view((current_batch_size, 768)), torch.transpose(hard_negative_code_embeddings.view((-1, 768)), 0, 1))
-            l_hard_neg_pl_nl = torch.matmul(code_embeddings.view((current_batch_size, 768)), torch.transpose(hard_negative_docs_embeddings.view((-1, 768)), 0, 1))
+            l_hard_neg_nl_pl = torch.matmul(docs_embeddings, hard_negative_code_embeddings.T)
+            l_hard_neg_pl_nl = torch.matmul(code_embeddings, hard_negative_docs_embeddings.T)
 
             l_hard_neg_nl_pl = torch.squeeze(l_hard_neg_nl_pl)
             l_hard_neg_pl_nl = torch.squeeze(l_hard_neg_pl_nl)
@@ -302,10 +333,10 @@ class xMoCoModelPTL(LightningModule):
                     if hard_negative_code_indices[j] == batch_indices[i]:
                         l_hard_neg_pl_nl[i][j] = -1
 
-            if self.hard_negative_queue_size > 0: # usually makes the score worse
+            if self.hard_negative_queue_size > 0:
                 # compute the similarity on prevîous hard negatives (the ones held in the hard negative queue)
-                l_hard_neg_nl_pl_queue = torch.matmul(docs_embeddings.view((current_batch_size, 768)), torch.transpose(self.hard_negative_code_queue.view((-1, 768)), 0, 1))
-                l_hard_neg_pl_nl_queue = torch.matmul(code_embeddings.view((current_batch_size, 768)), torch.transpose(self.hard_negative_docs_queue.view((-1, 768)), 0, 1))
+                l_hard_neg_nl_pl_queue = torch.matmul(docs_embeddings, self.hard_negative_code_queue.T)
+                l_hard_neg_pl_nl_queue = torch.matmul(code_embeddings, self.hard_negative_docs_queue.T)
 
                 # concat results with in-batch logits
                 logits_nl_pl = torch.cat((logits_nl_pl, l_hard_neg_nl_pl_queue), dim=1)
@@ -432,38 +463,35 @@ def execute(args):
     # set all seeds so we can ensure same MLP initialization and augmentation behaviour on all GPUS
     seed_everything(args.seed, workers=False)
 
-    model = xMoCoModelPTL(args)
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
     logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}-use_barlow_{args.use_barlow_loss}-barl_pd_{args.barlow_projector_dimension}-barl_lambd_{args.barlow_lambda}-barl_weight_{args.barlow_weight}")
 
-    early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
-    checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
+    if not args.skip_training:
+        model = xMoCoModelPTL(args)
 
-    callbacks=[checkpoint_callback, early_stopping_callback]
+        early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
+        checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
 
-    trainer = Trainer(callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=(1 if (args.augment or args.num_hard_negatives>0) else 0), accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+        callbacks=[checkpoint_callback, early_stopping_callback]
 
-    trainer.fit(model)
+        trainer = Trainer(callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=(1 if (args.augment or args.num_hard_negatives>0) else 0), accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
-    print(f"Training done. Best checkpoint: {checkpoint_callback.best_model_path} with validation MRR {checkpoint_callback.best_model_score}")
+        trainer.fit(model)
+
+        print(f"Training done. Best checkpoint: {checkpoint_callback.best_model_path} with validation MRR {checkpoint_callback.best_model_score}")
 
     if args.do_test: #note: currently, this will crash the program because the folder somehow doesn't get generated; will need to fix this later
-        # load best checkpoint
-        model = xMoCoModelPTL.load_from_checkpoint(checkpoint_callback.best_model_path)
+        # load best checkpoint from training
+        if not args.skip_training and args.checkpoint_path!=None:
+            model = xMoCoModelPTL.load_from_checkpoint(checkpoint_callback.best_model_path)
+        else:
+            trainer = Trainer(gpus=args.num_gpus, logger=logger, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
+            model = xMoCoModelPTL.load_from_checkpoint(args.checkpoint_path)
 
-        # generate test set by combining the validation and test set
-        docs_tokenizer = AutoTokenizer.from_pretrained(args.docs_encoder)
-        code_tokenizer = AutoTokenizer.from_pretrained(args.code_encoder)
-
-        val_dataloader = generateDataLoader(args.language, "valid", docs_tokenizer, code_tokenizer, args, shuffle=False, augment=False, num_workers=args.num_workers)
-        test_dataloader = generateDataLoader(args.language, "test", docs_tokenizer, code_tokenizer, args, shuffle=False, augment=False, num_workers=args.num_workers)
-
-        dataloaders_list = [val_dataloader, test_dataloader]
-
-        # run the actual tests
-        trainer.test(model=model, dataloaders=dataloaders_list) # this SHOULD use ddp and multiple GPUs. If not, I will need to change a lot of stuff about the test loop...
+        # run the actual tests (data is loaded in test_dataloader())
+        trainer.test(model=model)
 
 if __name__ == "__main__":
     # [PARSE ARGUMENTS] (if they are given, otherwise keep default value)
@@ -497,6 +525,8 @@ if __name__ == "__main__":
     parser.add_argument("--barlow_projector_dimension", type=int, default=2048)
     parser.add_argument("--barlow_lambda", type=float, default=0.005)
     parser.add_argument("--barlow_weight", type=float, default=0.001)
+    parser.add_argument("--skip_training", action="store_true", default=False)
+    parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--do_test", action="store_true", default=False)
     args = parser.parse_args()
 
