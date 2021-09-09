@@ -41,11 +41,13 @@ There are many flags for xMoCo_pl.py, some for hyperparameters and some for debu
     --language: which subset of the CodeSearchNet dataset to use
     --num_hard_negatives: number of hard negatives to fetch per sample
     --hard_negative_queue_size: the size of the hard negative queue
+    --skip_training: skips training and jumps right into testing (if enabled)
+    --checkpoint_path: path to the model checkpoint that should be used for testing
     --do_test: when set, the best checkpoint is loaded after training and the combined val/test set is used to determine the final MRR
 
 An example command can be seen below:
 
-     python xMoCo_pl.py --effective_queue_size=4096 --effective_batch_size 32 --learning_rate=2e-5 --shuffle --num_hard_negatives=2 --language="ruby" --debug_data_skip_interval=1 --always_use_full_val 
+     python xMoCo_pl.py --effective_queue_size=4096 --effective_batch_size 32 --learning_rate=1e-5 --shuffle --num_hard_negatives=2 --language="ruby" --debug_data_skip_interval=1 --always_use_full_val 
 
    
 
