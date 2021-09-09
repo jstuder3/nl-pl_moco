@@ -1,6 +1,7 @@
 Repository for my bachelor thesis, where I try to improve on previous code search (NL to PL) methods by applying the xMoCo framework and other methods.
 
-![image](https://user-images.githubusercontent.com/87820315/132727908-99f46e49-00ed-466e-9605-5a44dede9a19.png)
+![image](https://user-images.githubusercontent.com/87820315/132730082-bfb976d2-7aae-40ed-b7eb-59c4790f2abd.png)
+
 
 For comparable results, it is necessary to download the pre-processed and pre-filtered CodeSearchNet dataset by the authors of CodeBERT from https://github.com/microsoft/CodeBERT/tree/master/CodeBERT/code2nl (download link: https://drive.google.com/file/d/1rd2Tc6oUWBo7JouwexW3ksQ0PaOhUr6h).
 
