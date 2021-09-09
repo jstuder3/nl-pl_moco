@@ -232,7 +232,7 @@ class xMoCoModelPTL(LightningModule):
         c = torch.matmul(docs_norm.T, code_norm)
 
         D=c.shape[0]
-        c_diff = (c-torch.eye(D).type(as_c)).pow(2)
+        c_diff = (c-torch.eye(D).type_as(c)).pow(2)
 
         topleft = torch.clone(c_diff[0][0])
         other = torch.clone(c_diff[0][1])*self.barlow_lambda
@@ -518,7 +518,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--language", type=str, default="ruby")
     parser.add_argument("--enable_mlp", action="store_true", default=False) # this currently does nothing
-    parser.add_argument("--num_hard_negatives", type=int, default=4)
+    parser.add_argument("--num_hard_negatives", type=int, default=0)
     parser.add_argument("--hard_negative_queue_size", type=int, default=0)
     parser.add_argument("--enable_training_mode_on_slow_encoders", action="store_true", default=False)
     parser.add_argument("--use_barlow_loss", action="store_true", default=False)
