@@ -41,6 +41,8 @@ There are many flags for xMoCo_pl.py, some for hyperparameters and some for debu
     --enable_barlow_loss:       Enables the Barlow loss in addition to the InfoNCE loss
     --barlow_lambda:            Weight of off-diagonal elements in the Barlow loss
     --barlow_weight:            Importance of Barlow loss (used to trade off InfoNCE and Barlow)
+    --barlow_projector_dimension: Dimension of the barlow projector (0 to disable)
+    --barlow_tied_projectors:   Ties the two barlow projectors such that Docs and Code are pushed through the same projector
     --shuffle:                  Enables shuffling of the training data
     --augment:                  Enables EDA augmentation of the NL part of the training data
     --base_data_folder:         Folder that contains the cleaned CodeSearchNet dataset
