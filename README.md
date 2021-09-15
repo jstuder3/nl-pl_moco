@@ -1,4 +1,7 @@
-Repository for my bachelor thesis, where I try to improve on previous code search (NL to PL) methods by applying the xMoCo framework.
+Repository for my bachelor thesis, where I try to improve on previous code search (NL to PL) methods by applying the xMoCo framework and other methods.
+
+![image](https://user-images.githubusercontent.com/87820315/132730082-bfb976d2-7aae-40ed-b7eb-59c4790f2abd.png)
+
 
 For comparable results, it is necessary to download the pre-processed and pre-filtered CodeSearchNet dataset by the authors of CodeBERT from https://github.com/microsoft/CodeBERT/tree/master/CodeBERT/code2nl (download link: https://drive.google.com/file/d/1rd2Tc6oUWBo7JouwexW3ksQ0PaOhUr6h).
 
@@ -25,25 +28,28 @@ Requirements to run:
 
 There are many flags for xMoCo_pl.py, some for hyperparameters and some for debugging. The important ones are:
 
-    --docs_encoder: huggingface model path for the docstring encoder (needs to have 768 embedding size)
-    --code_encoder: huggingface model path for the code encoder (needs to have 768 embedding size)
-    --num_epochs: number of epochs to train for at most (early stopping is enabled)
-    --effective_batch_size: effective batch size. a batch of effective_batch_size/num_gpus is used per gpu
-    --learning_rate: learning rate
-    --temperature: temperature parameter for the adapted InfoNCE loss
-    --effective_queue_size: number of samples the queue can hold
-    --momentum_update_weight: factor used for the momentum encoder updates
-    --shuffle: enables shuffling of the training data
-    --augment: enables EDA augmentation of the NL part of the training data
-    --base_data_folder: folder that contains the cleaned CodeSearchNet dataset
-    --debug_data_skip_interval: take only every i-th entry of the train/val dataset to decrease amount of data used
-    --always_use_full_val: ignores the debug_data_skip_interval flag for the validation set
-    --language: which subset of the CodeSearchNet dataset to use
-    --num_hard_negatives: number of hard negatives to fetch per sample
-    --hard_negative_queue_size: the size of the hard negative queue
-    --skip_training: skips training and jumps right into testing (if enabled)
-    --checkpoint_path: path to the model checkpoint that should be used for testing
-    --do_test: when set, the best checkpoint is loaded after training and the combined val/test set is used to determine the final MRR
+    --docs_encoder:             Huggingface model path for the docstring encoder (needs to have 768 embedding size)
+    --code_encoder:             Huggingface model path for the code encoder (needs to have 768 embedding size)
+    --num_epochs:               Number of epochs to train for at most (early stopping is enabled)
+    --effective_batch_size:     Effective batch size. a batch of effective_batch_size/num_gpus is used per gpu
+    --learning_rate:            Learning rate
+    --temperature:              Temperature parameter for the adapted InfoNCE loss
+    --effective_queue_size:     Number of samples the queue can hold
+    --momentum_update_weight:   Factor used for the momentum encoder updates
+    --num_hard_negatives:       Number of hard negatives to fetch per sample
+    --hard_negative_queue_size: The size of the hard negative queue
+    --enable_barlow_loss:       Enables the Barlow loss in addition to the InfoNCE loss
+    --barlow_lambda:            Weight of off-diagonal elements in the Barlow loss
+    --barlow_weight:            Importance of Barlow loss (used to trade off InfoNCE and Barlow)
+    --shuffle:                  Enables shuffling of the training data
+    --augment:                  Enables EDA augmentation of the NL part of the training data
+    --base_data_folder:         Folder that contains the cleaned CodeSearchNet dataset
+    --debug_data_skip_interval: Take only every i-th entry of the train/val dataset to decrease amount of data used
+    --always_use_full_val:      Ignores the debug_data_skip_interval flag for the validation set
+    --language:                 Which subset of the CodeSearchNet dataset to use
+    --skip_training:            Skips training and jumps right into testing (if enabled)
+    --checkpoint_path:          Path to the model checkpoint that should be used for testing
+    --do_test:                  When set, the best checkpoint is loaded after training and the combined val/test set is used to determine the final MRR
 
 An example command can be seen below:
 
