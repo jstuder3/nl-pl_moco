@@ -35,24 +35,31 @@ class xMoCoModelPTL(LightningModule):
         self.use_barlow_loss=args.use_barlow_loss
         if args.use_barlow_loss:
             pd = args.barlow_projector_dimension
-            self.docs_projector = nn.Sequential(
-                nn.Linear(768, pd),
-                nn.BatchNorm1d(pd),
-                nn.ReLU(),
-                nn.Linear(pd, pd),
-                nn.BatchNorm1d(pd),
-                nn.ReLU(),
-                nn.Linear(pd, pd)
-            )
-            self.code_projector = nn.Sequential(
-                nn.Linear(768, pd),
-                nn.BatchNorm1d(pd),
-                nn.ReLU(),
-                nn.Linear(pd, pd),
-                nn.BatchNorm1d(pd),
-                nn.ReLU(),
-                nn.Linear(pd, pd)
-            )
+            if pd == 0:
+                self.docs_projector = nn.Identity()
+                self.code_projector=nn.Identity()
+            else:
+                self.docs_projector=nn.Sequential(
+                    nn.Linear(768, pd),
+                    nn.BatchNorm1d(pd),
+                    nn.ReLU(),
+                    nn.Linear(pd, pd),
+                    nn.BatchNorm1d(pd),
+                    nn.ReLU(),
+                    nn.Linear(pd, pd)
+                )
+                if args.barlow_tied_projectors:
+                    self.code_projector=self.docs_projector
+                else:
+                    self.code_projector = nn.Sequential(
+                        nn.Linear(768, pd),
+                        nn.BatchNorm1d(pd),
+                        nn.ReLU(),
+                        nn.Linear(pd, pd),
+                        nn.BatchNorm1d(pd),
+                        nn.ReLU(),
+                        nn.Linear(pd, pd)
+                    )
             self.barlow_lambda = args.barlow_lambda
             self.barlow_weight = args.barlow_weight
 
@@ -101,11 +108,11 @@ class xMoCoModelPTL(LightningModule):
         self.docs_queue = F.normalize(self.docs_queue, p=2, dim=1)
         self.code_queue = F.normalize(self.code_queue, p=2, dim=1)
 
-        # we actually only need one indices and current_index storage buffer, but that would make the replaceOldestQueueEntry implementation a bit nasty. Since these aren't big, I'll just keep it :P
         # dataset indices of the samples in the queues
         self.register_buffer("docs_indices", torch.empty(self.effective_queue_size).fill_(-1))
         self.register_buffer("code_indices", torch.empty(self.effective_queue_size).fill_(-1))
 
+        # we actually only need one indices and current_index register_buffer, but that would make the replaceOldestQueueEntry implementation a bit nasty. Since these aren't big, I'll just keep it :P
         # pointers to the starting index of the next block to be replaced
         self.register_buffer("docs_current_index", torch.zeros(1, dtype=torch.long))
         self.register_buffer("code_current_index", torch.zeros(1, dtype=torch.long))
@@ -163,7 +170,7 @@ class xMoCoModelPTL(LightningModule):
 
         concat_dataset = CodeSearchNetDataset(concat_docs, concat_code)
 
-        test_dataloader = torch.utils.data.DataLoader(concat_dataset, batch_size=int(args.effective_batch_size/args.num_gpus), drop_last=True)
+        test_dataloader = torch.utils.data.DataLoader(concat_dataset, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), drop_last=True)
 
         return test_dataloader
 
@@ -219,8 +226,6 @@ class xMoCoModelPTL(LightningModule):
         return slow_docs_embeddings, slow_code_embeddings
 
     def barlow_computations(self, docs_representations, code_representations):
-        # NOTE: COMPLETELY UNTESTED
-
         # projector network forward
         docs_embeddings = self.docs_projector(docs_representations)
         code_embeddings = self.code_projector(code_representations)
@@ -257,7 +262,6 @@ class xMoCoModelPTL(LightningModule):
 
     def training_step(self, batch, batch_idx):
 
-
         # update FAISS index in-epoch
         #if self.args.num_hard_negatives>0 and batch_idx % int(ceil(self.num_batches/3)+1) == 0 and batch_idx!=0:
         #    generateHardNegativeSearchIndices(self)
@@ -290,6 +294,15 @@ class xMoCoModelPTL(LightningModule):
         logits_nl_pl = torch.cat((l_pos_nl_pl, l_neg_nl_pl), dim=1)
         logits_pl_nl = torch.cat((l_pos_pl_nl, l_neg_pl_nl), dim=1)
 
+        # mask out false negatives in the regular queues
+        if self.args.remove_duplicates:
+            for i in range(current_batch_size):
+                positive_index=batch_indices[i]
+                for j in range(self.effective_queue_size):
+                    if positive_index == self.docs_indices[j]: # indices in the regular queue are always the same
+                        logits_nl_pl[i][j]=-99
+                        logits_pl_nl[i][j]=-99
+
         # [FIND HARD NEGATIVES] (if enabled)
         if self.num_hard_negatives>0:
             _, hard_negative_docs_indices = self.code_faiss.search(docs_embeddings.detach().cpu().numpy(), self.num_hard_negatives)
@@ -319,24 +332,31 @@ class xMoCoModelPTL(LightningModule):
             l_hard_neg_nl_pl = torch.squeeze(l_hard_neg_nl_pl)
             l_hard_neg_pl_nl = torch.squeeze(l_hard_neg_pl_nl)
 
-            # mask out all false negatives in the nl_pl part
+            # mask out false negatives in the hard negative part (we always do that, regardless of the remove_duplicates parameter)
             hard_negative_docs_indices = hard_negative_docs_indices.reshape(-1)
-            for i in range(current_batch_size):
-                for j in range(hard_negative_docs_indices.shape[0]):
-                    if hard_negative_docs_indices[j] == batch_indices[i]:
-                        l_hard_neg_nl_pl[i][j] = -1
-
-            #mask out all false negatives in the pl_nl part
             hard_negative_code_indices = hard_negative_code_indices.reshape(-1)
             for i in range(current_batch_size):
-                for j in range(hard_negative_code_indices.shape[0]):
-                    if hard_negative_code_indices[j] == batch_indices[i]:
-                        l_hard_neg_pl_nl[i][j] = -1
+                positive_index=batch_indices[i]
+                for j in range(hard_negative_docs_indices.shape[0]):
+                    if hard_negative_docs_indices[j] == positive_index: #indices in the two hard negative logits might be different
+                        l_hard_neg_nl_pl[i][j] = -99
+                    if hard_negative_code_indices[j] == positive_index:
+                        l_hard_neg_pl_nl[i][j] = -99
 
             if self.hard_negative_queue_size > 0:
                 # compute the similarity on prevîous hard negatives (the ones held in the hard negative queue)
                 l_hard_neg_nl_pl_queue = torch.matmul(docs_embeddings, self.hard_negative_code_queue.T)
                 l_hard_neg_pl_nl_queue = torch.matmul(code_embeddings, self.hard_negative_docs_queue.T)
+
+                # mask out false negatives in the hard negative queue:
+                if self.args.remove_duplicates:
+                    for i in range(current_batch_size):
+                        positive_index=batch_indices[i]
+                        for j in range(self.args.hard_negative_queue_size):
+                            if self.hard_negative_docs_indices[j] == positive_index: # indices in the two hard negative queues might be different
+                                l_hard_neg_nl_pl_queue[i][j] = -99
+                            if self.hard_negative_code_indices[j] == positive_index:
+                                l_hard_neg_pl_nl_queue[i][j] = -99
 
                 # concat results with in-batch logits
                 logits_nl_pl = torch.cat((logits_nl_pl, l_hard_neg_nl_pl_queue), dim=1)
@@ -485,7 +505,7 @@ def execute(args):
     if args.do_test: #note: currently, this will crash the program because the folder somehow doesn't get generated; will need to fix this later
         # load best checkpoint from training
         if not args.skip_training and args.checkpoint_path!=None:
-            model = xMoCoModelPTL.load_from_checkpoint(checkpoint_callback.best_model_path)
+            model = xMoCoModelPTL.load_from_checkpoint(checkpoint_callback.best_model_path) # this somehow doesn't work, we always need to run the program again with --skip_training and --do_test and the checkpoint that was generated during training
         else:
             trainer = Trainer(gpus=args.num_gpus, logger=logger, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
             model = xMoCoModelPTL.load_from_checkpoint(args.checkpoint_path)
@@ -499,7 +519,7 @@ if __name__ == "__main__":
     parser.add_argument("--docs_encoder", type=str, default="microsoft/codebert-base")
     parser.add_argument("--code_encoder", type=str, default="microsoft/codebert-base")
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--effective_batch_size", type=int, default=8)
+    parser.add_argument("--effective_batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--effective_queue_size", type=int, default=4096)
@@ -517,20 +537,20 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=int, default=16)
     parser.add_argument("--num_gpus", type=int, default=torch.cuda.device_count())
     parser.add_argument("--language", type=str, default="ruby")
-    parser.add_argument("--enable_mlp", action="store_true", default=False) # this currently does nothing
     parser.add_argument("--num_hard_negatives", type=int, default=0)
     parser.add_argument("--hard_negative_queue_size", type=int, default=0)
     parser.add_argument("--enable_training_mode_on_slow_encoders", action="store_true", default=False)
     parser.add_argument("--use_barlow_loss", action="store_true", default=False)
-    parser.add_argument("--barlow_projector_dimension", type=int, default=2048)
+    parser.add_argument("--barlow_projector_dimension", type=int, default=0)
     parser.add_argument("--barlow_lambda", type=float, default=0.005)
-    parser.add_argument("--barlow_weight", type=float, default=0.001)
+    parser.add_argument("--barlow_weight", type=float, default=5e-5)
+    parser.add_argument("--barlow_tied_projectors", action="store_true", default=False)
     parser.add_argument("--skip_training", action="store_true", default=False)
     parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--do_test", action="store_true", default=False)
     args = parser.parse_args()
 
-    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, enable_mlp={args.enable_mlp}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}, use_barlow_loss={args.use_barlow_loss}, barlow_projector_dimension={args.barlow_projector_dimension}, barlow_lambda={args.barlow_lambda}, barlow_weight={args.barlow_weight}")
+    print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}, use_barlow_loss={args.use_barlow_loss}, barlow_projector_dimension={args.barlow_projector_dimension}, barlow_lambda={args.barlow_lambda}, barlow_weight={args.barlow_weight}")
 
     execute(args)
 
