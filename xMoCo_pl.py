@@ -498,9 +498,11 @@ def execute(args):
         model = xMoCoModelPTL(args)
 
         early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
-        checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
-
-        callbacks=[checkpoint_callback, early_stopping_callback]
+        if args.generate_checkpoints:
+            checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
+            callbacks=[checkpoint_callback, early_stopping_callback]
+        else:
+            callbacks=[early_stopping_callback]
 
         trainer = Trainer(callbacks=callbacks, val_check_interval=1.0, gpus=args.num_gpus, max_epochs=args.num_epochs, logger=logger, log_every_n_steps=10, flush_logs_every_n_steps=50, reload_dataloaders_every_n_epochs=(1 if (args.augment or args.num_hard_negatives>0) else 0), accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
 
@@ -554,6 +556,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_training", action="store_true", default=False)
     parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--do_test", action="store_true", default=False)
+    parser.add_argument("--generate_checkpoints", action="store_true", default=False)
     args = parser.parse_args()
 
     print(f"[HYPERPARAMETERS] Hyperparameters: xMoCo - language={args.language} - num_epochs={args.num_epochs}; effective_batch_size={args.effective_batch_size}; learning_rate={args.learning_rate}; temperature={args.temperature}; effective_queue_size={args.effective_queue_size}; momentum_update_weight={args.momentum_update_weight}; shuffle={args.shuffle}; augment={args.augment}; DEBUG_data_skip_interval={args.debug_data_skip_interval}; always_use_full_val={args.always_use_full_val}; base_data_folder={args.base_data_folder}; seed={args.seed}; num_workers={args.num_workers}, accelerator={args.accelerator}, plugins={args.plugins}, num_gpus={args.num_gpus}, remove_duplicates={args.remove_duplicates}, language={args.language}, use_hard_negatives={args.num_hard_negatives>0}, num_hard_negatives={args.num_hard_negatives}; hard_negative_queue_size={args.hard_negative_queue_size}; enable_training_mode_on_slow_encoders={args.enable_training_mode_on_slow_encoders}, use_barlow_loss={args.use_barlow_loss}, barlow_projector_dimension={args.barlow_projector_dimension}, barlow_lambda={args.barlow_lambda}, barlow_weight={args.barlow_weight}")
