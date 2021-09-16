@@ -12,6 +12,7 @@ import sys
 import json
 
 model = None
+prev_language=None
 tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
 
 def loadJson(filename):
@@ -46,7 +47,7 @@ def generateEmbeddings(model, dataloader, subset):
     return embedding_tensor
 
 def getCodeSamples(button):
-    global model, tokenizer
+    global model, prev_language, tokenizer
 
     #need to reload these every time because the language might have changed
     train_json=None
@@ -81,8 +82,9 @@ def getCodeSamples(button):
                     code_embeddings[key] = torch.load(f"cache/{language}_{key}.pt")
                 except:
                     print(f"No cached tensors found. Generating embeddings...")
-                    if model==None:
+                    if model==None or prev_language!=language:
                         model=xMoCoModelPTL.load_from_checkpoint(f"checkpoints/{language}.ckpt")
+                        prev_language=language
 
                     dataloader=generateDataLoader(language, key, tokenizer, tokenizer, args)
                     code_embeddings[key]=generateEmbeddings(model, dataloader, key).type(torch.float16)
@@ -92,8 +94,9 @@ def getCodeSamples(button):
 
         embeddings_matrix = torch.cat((code_embeddings["train"], code_embeddings["valid"], code_embeddings["test"])).type(torch.half)
 
-        if model == None:
+        if model == None or prev_language!=language:
             model = xMoCoModelPTL.load_from_checkpoint(f"checkpoints/{language}.ckpt")
+            prev_language=language
 
         # tokenize and encode the given docstring
         query_tokenized = tokenizer(query, truncation=True, padding="max_length")
