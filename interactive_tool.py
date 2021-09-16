@@ -85,12 +85,12 @@ def getCodeSamples(button):
                         model=xMoCoModelPTL.load_from_checkpoint(f"checkpoints/{language}.ckpt")
 
                     dataloader=generateDataLoader(language, key, tokenizer, tokenizer, args)
-                    code_embeddings[key]=generateEmbeddings(model, dataloader, key)
+                    code_embeddings[key]=generateEmbeddings(model, dataloader, key).type(torch.float16)
                     torch.save(code_embeddings[key], f"cache/{language}_{key}.pt")
 
         assert code_embeddings["train"].shape[0]>0 or code_embeddings["valid"].shape[0]>0 or code_embeddings["test"].shape[0]>0, "Please select at least one subset to search in"
 
-        embeddings_matrix = torch.cat((code_embeddings["train"], code_embeddings["valid"], code_embeddings["test"]))
+        embeddings_matrix = torch.cat((code_embeddings["train"], code_embeddings["valid"], code_embeddings["test"])).type(torch.half)
 
         if model == None:
             model = xMoCoModelPTL.load_from_checkpoint(f"checkpoints/{language}.ckpt")
@@ -108,7 +108,7 @@ def getCodeSamples(button):
             model.docs_fast_encoder.eval()
         with torch.no_grad():
             query_embedding = model.docs_fast_encoder(input_ids=input_tokens, attention_mask=input_mask)["pooler_output"]
-            query_embedding = F.normalize(query_embedding, p=2, dim=1)
+            query_embedding = F.normalize(query_embedding, p=2, dim=1).type(torch.half)
 
         similarity_matrix = torch.matmul(query_embedding, embeddings_matrix.T)
         top_similarities, top_indices = torch.topk(similarity_matrix, num_samples)
@@ -130,7 +130,7 @@ def getCodeSamples(button):
                 assert False, "Something went wrong..."
             #confidence=torch.exp(top_similarities[0][i])/torch.sum(torch.exp(similarity_matrix))
             header_str = f"{i+1}: (similarity: {top_similarities[0][i].item():.4f})\n{data['url']}\n\n"
-            output_str += header_str + data["code"] +"\n\n" + after_str
+            output_str += header_str + data["docstring"]+ "\n\n" + data["code"] +"\n\n" + after_str
 
         app.clearTextArea("outputs")
         app.setTextArea("outputs", output_str)

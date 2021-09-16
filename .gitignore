@@ -4,3 +4,5 @@ runs/*
 .idea/*
 *.pyc
 faiss_fiddle.py
+*.ckpt
+remove_unnecessary_data_from_checkpoints.py
