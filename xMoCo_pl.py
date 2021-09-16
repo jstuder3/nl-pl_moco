@@ -101,21 +101,22 @@ class xMoCoModelPTL(LightningModule):
                 self.register_buffer("hard_negative_docs_current_index", torch.zeros(1, dtype=torch.long)) # the value in those will be identical, but we need both because of how I defined the replaceOldestQueueEntry function
                 self.register_buffer("hard_negative_code_current_index", torch.zeros(1, dtype=torch.long))
 
-        # queues
-        self.register_buffer("docs_queue", torch.randn(self.effective_queue_size, 768))
-        self.register_buffer("code_queue", torch.randn(self.effective_queue_size, 768))
+        if self.effective_queue_size>0: # note: using the combination of effective_queue size=0 and num_hard negatives>0 will break the code!
+            # queues
+            self.register_buffer("docs_queue", torch.randn(self.effective_queue_size, 768))
+            self.register_buffer("code_queue", torch.randn(self.effective_queue_size, 768))
 
-        self.docs_queue = F.normalize(self.docs_queue, p=2, dim=1)
-        self.code_queue = F.normalize(self.code_queue, p=2, dim=1)
+            self.docs_queue = F.normalize(self.docs_queue, p=2, dim=1)
+            self.code_queue = F.normalize(self.code_queue, p=2, dim=1)
 
-        # dataset indices of the samples in the queues
-        self.register_buffer("docs_indices", torch.empty(self.effective_queue_size).fill_(-1))
-        self.register_buffer("code_indices", torch.empty(self.effective_queue_size).fill_(-1))
+            # dataset indices of the samples in the queues
+            self.register_buffer("docs_indices", torch.empty(self.effective_queue_size).fill_(-1))
+            self.register_buffer("code_indices", torch.empty(self.effective_queue_size).fill_(-1))
 
-        # we actually only need one indices and current_index register_buffer, but that would make the replaceOldestQueueEntry implementation a bit nasty. Since these aren't big, I'll just keep it :P
-        # pointers to the starting index of the next block to be replaced
-        self.register_buffer("docs_current_index", torch.zeros(1, dtype=torch.long))
-        self.register_buffer("code_current_index", torch.zeros(1, dtype=torch.long))
+            # we actually only need one indices and current_index register_buffer, but that would make the replaceOldestQueueEntry implementation a bit nasty. Since these aren't big, I'll just keep it :P
+            # pointers to the starting index of the next block to be replaced
+            self.register_buffer("docs_current_index", torch.zeros(1, dtype=torch.long))
+            self.register_buffer("code_current_index", torch.zeros(1, dtype=torch.long))
 
         self.save_hyperparameters()
 
@@ -239,8 +240,8 @@ class xMoCoModelPTL(LightningModule):
         D=c.shape[0]
         c_diff = (c-torch.eye(D).type_as(c)).pow(2)
 
-        topleft = torch.clone(c_diff[0][0])
-        other = torch.clone(c_diff[0][1])*self.barlow_lambda
+        #topleft = torch.clone(c_diff[0][0])
+        #other = torch.clone(c_diff[0][1])*self.barlow_lambda
 
         # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
         diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
@@ -248,11 +249,11 @@ class xMoCoModelPTL(LightningModule):
         c_diff = c_diff.masked_fill(mask, 0)*self.barlow_lambda+diagonal_matrix
 
         #sanity check:
-        try:
-            assert c_diff[0][0]==topleft and c_diff[0][1]==other, "Assertion error: CC matrix faulty: " + (f"c[0][0]={c[0][0]}, should be {topleft}" if c[0][0]!=topleft else "") + (f"c[0][1]={c[0][1]}, should be {other}" if c[0][1]!=other else "")
-        except:
-            import IPython
-            IPython.embed()
+        #try:
+        #    assert c_diff[0][0]==topleft and c_diff[0][1]==other, "Assertion error: CC matrix faulty: " + (f"c[0][0]={c[0][0]}, should be {topleft}" if c[0][0]!=topleft else "") + (f"c[0][1]={c[0][1]}, should be {other}" if c[0][1]!=other else "")
+        #except:
+        #    import IPython
+        #    IPython.embed()
 
         loss = c_diff.sum()*self.barlow_weight
 
@@ -288,11 +289,15 @@ class xMoCoModelPTL(LightningModule):
         l_pos_nl_pl = torch.matmul(docs_embeddings, positive_slow_code_embeddings.T)
         l_pos_pl_nl = torch.matmul(code_embeddings, positive_slow_docs_embeddings.T)
 
-        l_neg_nl_pl = torch.matmul(docs_embeddings, self.code_queue.T)
-        l_neg_pl_nl = torch.matmul(code_embeddings, self.docs_queue.T)
+        if self.effective_queue_size>0:
+            l_neg_nl_pl = torch.matmul(docs_embeddings, self.code_queue.T)
+            l_neg_pl_nl = torch.matmul(code_embeddings, self.docs_queue.T)
 
-        logits_nl_pl = torch.cat((l_pos_nl_pl, l_neg_nl_pl), dim=1)
-        logits_pl_nl = torch.cat((l_pos_pl_nl, l_neg_pl_nl), dim=1)
+            logits_nl_pl = torch.cat((l_pos_nl_pl, l_neg_nl_pl), dim=1)
+            logits_pl_nl = torch.cat((l_pos_pl_nl, l_neg_pl_nl), dim=1)
+        else:
+            logits_nl_pl = l_pos_nl_pl
+            logits_pl_nl = l_pos_pl_nl
 
         # mask out false negatives in the regular queues
         if self.args.remove_duplicates:
@@ -388,8 +393,9 @@ class xMoCoModelPTL(LightningModule):
         self.log("Loss/combined", loss.item(), sync_dist=True)
 
         # [UPDATE THE QUEUES]
-        self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices, self.effective_queue_size)
-        self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices, self.effective_queue_size)
+        if self.effective_queue_size>0: # the case queue_size=0 isn't handled anywhere else
+            self.replaceOldestQueueEntry(self.docs_queue, self.docs_indices, self.docs_current_index, positive_slow_docs_embeddings, batch_indices, self.effective_queue_size)
+            self.replaceOldestQueueEntry(self.code_queue, self.code_indices, self.code_current_index, positive_slow_code_embeddings, batch_indices, self.effective_queue_size)
 
         return loss
 
@@ -480,13 +486,13 @@ def execute(args):
         global generateHardNegativeSearchIndices
         from utils.hard_negative_search import generateHardNegativeSearchIndices
 
-    # set all seeds so we can ensure same MLP initialization and augmentation behaviour on all GPUS
+    # set all seeds so we can ensure same MLP initialization and augmentation behaviour on all GPUs
     seed_everything(args.seed, workers=False)
 
 
     now = datetime.now()
     now_str = now.strftime("%b%d_%H_%M_%S")
-    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}-use_barlow_{args.use_barlow_loss}-barl_pd_{args.barlow_projector_dimension}-barl_lambd_{args.barlow_lambda}-barl_weight_{args.barlow_weight}")
+    logger = TensorBoardLogger("runs", name=f"{now_str}-xMoCo-language_{args.language}-eff_bs_{args.effective_batch_size}-lr_{args.learning_rate}-eff_qs_{args.effective_queue_size}-max_epochs_{args.num_epochs}-aug_{args.augment}-shuf_{args.shuffle}-debug_skip_interval_{args.debug_data_skip_interval}-always_full_val_{args.always_use_full_val}-docs_enc_{args.docs_encoder}-code_enc_{args.code_encoder}-num_gpus_{args.num_gpus}-rmv_dup_{args.remove_duplicates}-use_hard_negatives_{args.num_hard_negatives>0}-num_hard_negatives_{args.num_hard_negatives}-hard_negative_queue_size_{args.hard_negative_queue_size}-tm_on_slow_{args.enable_training_mode_on_slow_encoders}-use_barlow_{args.use_barlow_loss}-barl_pd_{args.barlow_projector_dimension}-barl_lambd_{args.barlow_lambda}-barl_weight_{args.barlow_weight}")
 
     if not args.skip_training:
         model = xMoCoModelPTL(args)
@@ -510,7 +516,7 @@ def execute(args):
             trainer = Trainer(gpus=args.num_gpus, logger=logger, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
             model = xMoCoModelPTL.load_from_checkpoint(args.checkpoint_path)
 
-        # run the actual tests (data is loaded in test_dataloader())
+        # run the actual tests (data is loaded in model.test_dataloader())
         trainer.test(model=model)
 
 if __name__ == "__main__":
