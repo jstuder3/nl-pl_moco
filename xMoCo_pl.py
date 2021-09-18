@@ -231,6 +231,10 @@ class xMoCoModelPTL(LightningModule):
         docs_embeddings = self.docs_projector(docs_representations)
         code_embeddings = self.code_projector(code_representations)
 
+        # collect samples from other GPUs (needed for cross-corr matrix computation)
+        docs_embeddings = self.concatAllGather(docs_embeddings) # for barlow loss, we need all samples to compute the full cross-correlation matrix (otherwise we'd only get a subset of it per GPU)
+        code_embeddings = self.concatAllGather(code_embeddings)
+
         # barlow loss computation
         docs_norm = (docs_embeddings - torch.mean(docs_embeddings, dim=0)) / torch.std(docs_embeddings, dim=0)
         code_norm = (code_embeddings - torch.mean(code_embeddings, dim=0)) / torch.std(code_embeddings, dim=0)
@@ -252,10 +256,11 @@ class xMoCoModelPTL(LightningModule):
         #try:
         #    assert c_diff[0][0]==topleft and c_diff[0][1]==other, "Assertion error: CC matrix faulty: " + (f"c[0][0]={c[0][0]}, should be {topleft}" if c[0][0]!=topleft else "") + (f"c[0][1]={c[0][1]}, should be {other}" if c[0][1]!=other else "")
         #except:
-        #    import IPython
-        #    IPython.embed()
+        #    if self.global_rank==0:
+        #        import IPython
+        #        IPython.embed()
 
-        loss = c_diff.sum()*self.barlow_weight
+        loss = c_diff.sum()
 
         self.log("Loss/barlow", loss.item(), sync_dist=True)
 
@@ -386,7 +391,7 @@ class xMoCoModelPTL(LightningModule):
 
         if self.use_barlow_loss:
             loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
-            loss=loss_contrast+loss_barlow
+            loss = (1-self.args.barlow_weight)*loss_contrast + self.args.barlow_weight*loss_barlow
 
         # [LOGGING]
         self.log("Loss/contrast", loss_contrast.item(), sync_dist=True)
