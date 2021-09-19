@@ -286,6 +286,9 @@ class xMoCoModelPTL(LightningModule):
         docs_embeddings, code_embeddings = self(docs_samples, code_samples)
         positive_slow_docs_embeddings, positive_slow_code_embeddings = self.slow_forward(docs_samples, code_samples)
 
+        docs_embeddings_unnormalized = docs_embeddings
+        code_embeddings_unnormalized = code_embeddings
+
         docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
         code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
         positive_slow_docs_embeddings = F.normalize(positive_slow_docs_embeddings, p=2, dim=1)
@@ -310,8 +313,8 @@ class xMoCoModelPTL(LightningModule):
                 positive_index=batch_indices[i]
                 for j in range(self.effective_queue_size):
                     if positive_index == self.docs_indices[j]: # indices in the regular queue are always the same
-                        logits_nl_pl[i][j]=-99
-                        logits_pl_nl[i][j]=-99
+                        logits_nl_pl[i][j]=-1
+                        logits_pl_nl[i][j]=-1
 
         # [FIND HARD NEGATIVES] (if enabled)
         if self.num_hard_negatives>0:
@@ -349,9 +352,9 @@ class xMoCoModelPTL(LightningModule):
                 positive_index=batch_indices[i]
                 for j in range(hard_negative_docs_indices.shape[0]):
                     if hard_negative_docs_indices[j] == positive_index: #indices in the two hard negative logits might be different
-                        l_hard_neg_nl_pl[i][j] = -99
+                        l_hard_neg_nl_pl[i][j] = -1
                     if hard_negative_code_indices[j] == positive_index:
-                        l_hard_neg_pl_nl[i][j] = -99
+                        l_hard_neg_pl_nl[i][j] = -1
 
             if self.hard_negative_queue_size > 0:
                 # compute the similarity on prevîous hard negatives (the ones held in the hard negative queue)
@@ -364,9 +367,9 @@ class xMoCoModelPTL(LightningModule):
                         positive_index=batch_indices[i]
                         for j in range(self.args.hard_negative_queue_size):
                             if self.hard_negative_docs_indices[j] == positive_index: # indices in the two hard negative queues might be different
-                                l_hard_neg_nl_pl_queue[i][j] = -99
+                                l_hard_neg_nl_pl_queue[i][j] = -1
                             if self.hard_negative_code_indices[j] == positive_index:
-                                l_hard_neg_pl_nl_queue[i][j] = -99
+                                l_hard_neg_pl_nl_queue[i][j] = -1
 
                 # concat results with in-batch logits
                 logits_nl_pl = torch.cat((logits_nl_pl, l_hard_neg_nl_pl_queue), dim=1)
@@ -390,7 +393,8 @@ class xMoCoModelPTL(LightningModule):
         loss = loss_contrast
 
         if self.use_barlow_loss:
-            loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
+            loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized)
+            #loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
             loss = (1-self.args.barlow_weight)*loss_contrast + self.args.barlow_weight*loss_barlow
 
         # [LOGGING]
