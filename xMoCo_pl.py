@@ -62,6 +62,7 @@ class xMoCoModelPTL(LightningModule):
                     )
             self.barlow_lambda = args.barlow_lambda
             self.barlow_weight = args.barlow_weight
+            #self.barlow_batchnorm = nn.BatchNorm1d(768 if pd==0 else pd, affine=False)
 
         self.effective_queue_size = args.effective_queue_size
         self.update_weight = args.momentum_update_weight
@@ -226,14 +227,21 @@ class xMoCoModelPTL(LightningModule):
             slow_code_embeddings = self.code_slow_encoder(input_ids=code_samples["input_ids"], attention_mask=code_samples["attention_mask"])["pooler_output"]
         return slow_docs_embeddings, slow_code_embeddings
 
+    # copied from https://github.com/facebookresearch/barlowtwins/blob/a655214c76c97d0150277b85d16e69328ea52fd9/main.py#L180
+    def off_diagonal(self, x):
+        # return a flattened view of the off-diagonal elements of a square matrix
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
     def barlow_computations(self, docs_representations, code_representations):
         # projector network forward
         docs_embeddings = self.docs_projector(docs_representations)
         code_embeddings = self.code_projector(code_representations)
 
         # collect samples from other GPUs (needed for cross-corr matrix computation)
-        docs_embeddings = self.concatAllGather(docs_embeddings) # for barlow loss, we need all samples to compute the full cross-correlation matrix (otherwise we'd only get a subset of it per GPU)
-        code_embeddings = self.concatAllGather(code_embeddings)
+        #docs_embeddings_gathered = self.concatAllGather(docs_embeddings.detach()) # for barlow loss, we need all samples to compute the full cross-correlation matrix (otherwise we'd only get a subset of it per GPU)
+        #code_embeddings_gathered = self.concatAllGather(code_embeddings.detach())
 
         # barlow loss computation
         docs_norm = (docs_embeddings - torch.mean(docs_embeddings, dim=0)) / torch.std(docs_embeddings, dim=0)
@@ -241,16 +249,29 @@ class xMoCoModelPTL(LightningModule):
 
         c = torch.matmul(docs_norm.T, code_norm)
 
-        D=c.shape[0]
-        c_diff = (c-torch.eye(D).type_as(c)).pow(2)
+        # the following code is adapted from the distributed PyTorch implementation of BarlowTwins from https://github.com/facebookresearch/barlowtwins/blob/a655214c76c97d0150277b85d16e69328ea52fd9/main.py#L215 
+        c.div_(self.num_gpus) #divide by number of gpus because we sum up over all gpus later
+        torch.distributed.all_reduce(c) # sums up the cc-matrices from all gpus and put them in c # problematic when using PyTorch Lightning because loss gets synched across gpus again later
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = self.off_diagonal(c).pow_(2).sum()
+
+        loss = on_diag + self.args.barlow_lambda * off_diag
+
+        self.log("Loss/barlow", loss.item(), sync_dist=True)
+
+        return loss
+
+        #D=c.shape[0]
+        #c_diff = (c-torch.eye(D).type_as(c)).pow(2)
 
         #topleft = torch.clone(c_diff[0][0])
         #other = torch.clone(c_diff[0][1])*self.barlow_lambda
 
         # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
-        diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
-        mask = torch.eye(D, D).type_as(c).bool()
-        c_diff = c_diff.masked_fill(mask, 0)*self.barlow_lambda+diagonal_matrix
+        #diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
+        #mask = torch.eye(D, D).type_as(c).bool()
+        #c_diff = c_diff.masked_fill(mask, 0)*self.barlow_lambda+diagonal_matrix
 
         #sanity check:
         #try:
@@ -260,11 +281,11 @@ class xMoCoModelPTL(LightningModule):
         #        import IPython
         #        IPython.embed()
 
-        loss = c_diff.sum()
+        #loss = c_diff.sum()
 
-        self.log("Loss/barlow", loss.item(), sync_dist=True)
+        #self.log("Loss/barlow", loss.item(), sync_dist=True)
 
-        return loss
+        #return loss
 
     def training_step(self, batch, batch_idx):
 
@@ -393,7 +414,7 @@ class xMoCoModelPTL(LightningModule):
         loss = loss_contrast
 
         if self.use_barlow_loss:
-            loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized)
+            loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized) # seems it makes no difference whether we use this or the normalized ones, but I'll now stick to this as it is closer to what the Barlow paper did
             #loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
             loss = (1-self.args.barlow_weight)*loss_contrast + self.args.barlow_weight*loss_barlow
 
@@ -517,7 +538,10 @@ def execute(args):
 
         trainer.fit(model)
 
-        print(f"Training done. Best checkpoint: {checkpoint_callback.best_model_path} with validation MRR {checkpoint_callback.best_model_score}")
+        try:
+            print(f"Training done. Best checkpoint: {checkpoint_callback.best_model_path} with validation MRR {checkpoint_callback.best_model_score}")
+        except:
+            print("No checkpoint found.")
 
     if args.do_test: #note: currently, this will crash the program because the folder somehow doesn't get generated; will need to fix this later
         # load best checkpoint from training
