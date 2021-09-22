@@ -239,10 +239,6 @@ class xMoCoModelPTL(LightningModule):
         docs_embeddings = self.docs_projector(docs_representations)
         code_embeddings = self.code_projector(code_representations)
 
-        # collect samples from other GPUs (needed for cross-corr matrix computation)
-        #docs_embeddings_gathered = self.concatAllGather(docs_embeddings.detach()) # for barlow loss, we need all samples to compute the full cross-correlation matrix (otherwise we'd only get a subset of it per GPU)
-        #code_embeddings_gathered = self.concatAllGather(code_embeddings.detach())
-
         # barlow loss computation
         docs_norm = (docs_embeddings - torch.mean(docs_embeddings, dim=0)) / torch.std(docs_embeddings, dim=0)
         code_norm = (code_embeddings - torch.mean(code_embeddings, dim=0)) / torch.std(code_embeddings, dim=0)
@@ -250,8 +246,10 @@ class xMoCoModelPTL(LightningModule):
         c = torch.matmul(docs_norm.T, code_norm)
 
         # the following code is adapted from the distributed PyTorch implementation of BarlowTwins from https://github.com/facebookresearch/barlowtwins/blob/a655214c76c97d0150277b85d16e69328ea52fd9/main.py#L215 
-        c.div_(self.num_gpus) #divide by number of gpus because we sum up over all gpus later
-        torch.distributed.all_reduce(c) # sums up the cc-matrices from all gpus and put them in c # problematic when using PyTorch Lightning because loss gets synched across gpus again later
+
+        # since PTL synchs gradients across devices (by averaging them), we only have to divide by the local_batch_size
+        local_batch_size = int(self.args.effective_batch_size/self.args.num_gpus)
+        c.div_(local_batch_size) # divide by batch size to prevent influence thereof (thus, we don't have to find new weights when changing the batch size)
 
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = self.off_diagonal(c).pow_(2).sum()
@@ -261,31 +259,6 @@ class xMoCoModelPTL(LightningModule):
         self.log("Loss/barlow", loss.item(), sync_dist=True)
 
         return loss
-
-        #D=c.shape[0]
-        #c_diff = (c-torch.eye(D).type_as(c)).pow(2)
-
-        #topleft = torch.clone(c_diff[0][0])
-        #other = torch.clone(c_diff[0][1])*self.barlow_lambda
-
-        # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
-        #diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
-        #mask = torch.eye(D, D).type_as(c).bool()
-        #c_diff = c_diff.masked_fill(mask, 0)*self.barlow_lambda+diagonal_matrix
-
-        #sanity check:
-        #try:
-        #    assert c_diff[0][0]==topleft and c_diff[0][1]==other, "Assertion error: CC matrix faulty: " + (f"c[0][0]={c[0][0]}, should be {topleft}" if c[0][0]!=topleft else "") + (f"c[0][1]={c[0][1]}, should be {other}" if c[0][1]!=other else "")
-        #except:
-        #    if self.global_rank==0:
-        #        import IPython
-        #        IPython.embed()
-
-        #loss = c_diff.sum()
-
-        #self.log("Loss/barlow", loss.item(), sync_dist=True)
-
-        #return loss
 
     def training_step(self, batch, batch_idx):
 
