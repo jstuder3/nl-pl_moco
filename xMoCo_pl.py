@@ -401,10 +401,10 @@ class xMoCoModelPTL(LightningModule):
         loss = loss_contrast
 
         if self.use_barlow_loss:
-            #loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized) # seems it makes no difference whether we use this or the normalized ones, but I'll now stick to this as it is closer to what the Barlow paper did
             loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
-            #loss = loss_contrast + self.args.barlow_weight*loss_barlow # note that this is not strictly a "tradeoff" in the classical sense "(1-x) * a + x * b" but rather an additional loss. this seems to produce much better results
-            loss = (1-self.args.barlow_weight) * loss_contrast + self.args.barlow_weight * loss_barlow
+            loss = loss_contrast + self.args.barlow_weight*loss_barlow # note that this is not strictly a "tradeoff" in the classical sense "(1-x) * a + x * b" but rather an additional loss, like a regularization term
+            #loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized) # this changes the directions of the embeddings and reduces the effectiveness of Barlow
+            #loss = (1-self.args.barlow_weight) * loss_contrast + self.args.barlow_weight * loss_barlow # alternative method that is more in the sense of a "tradeoff" rather than a regularization term
 
         # [LOGGING]
         self.log("Loss/contrast", loss_contrast.item(), sync_dist=True)
