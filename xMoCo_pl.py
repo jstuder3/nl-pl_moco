@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torchvision.utils import make_grid
 from transformers import AutoModel, AutoTokenizer
 from pytorch_lightning import LightningModule, Trainer, seed_everything
 import pytorch_lightning as pl
@@ -234,7 +235,8 @@ class xMoCoModelPTL(LightningModule):
         assert n == m
         return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
-    def barlow_computations(self, docs_representations, code_representations):
+    # adapted from Barlow paper pseudocode
+    def barlow_matrix(self, docs_representations, code_representations):
         # projector network forward
         docs_embeddings = self.docs_projector(docs_representations)
         code_embeddings = self.code_projector(code_representations)
@@ -245,16 +247,28 @@ class xMoCoModelPTL(LightningModule):
 
         c = torch.matmul(docs_norm.T, code_norm)
 
-        # the following code is adapted from the distributed PyTorch implementation of BarlowTwins from https://github.com/facebookresearch/barlowtwins/blob/a655214c76c97d0150277b85d16e69328ea52fd9/main.py#L215 
+        return c
 
-        # since PTL synchs gradients across devices (by averaging them), we only have to divide by the local_batch_size
-        local_batch_size = int(self.args.effective_batch_size/self.args.num_gpus)
-        c.div_(local_batch_size) # divide by batch size to prevent influence thereof (thus, we don't have to find new weights when changing the batch size)
+    def barlow_computations(self, docs_representations, code_representations):
 
-        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
-        off_diag = self.off_diagonal(c).pow_(2).sum()
+        #topleft = torch.clone(c[0][0])
+        #other = torch.clone(c[0][1])
 
-        loss = on_diag + self.args.barlow_lambda * off_diag
+        #topleft = (topleft-1)**2
+        #other = (other**2)
+
+        # forward through projector and compute cross-correlation matrix (adapted from Barlow Paper pseudocode)
+        c = self.barlow_matrix(docs_representations, code_representations)
+
+        D=c.shape[0]
+        c_diff = (c-torch.eye(D, D).type_as(c)).pow(2)
+
+        # adapted from https://discuss.pytorch.org/t/fill-diagonal-of-matrix-with-zero/35083/6
+        diagonal_matrix = torch.diag(torch.diag(c_diff)) #remove all off-diagonal elements
+        mask = torch.eye(D, D).type_as(c).bool()
+        c_diff = c_diff.masked_fill(mask, 0)*self.barlow_lambda+diagonal_matrix
+
+        loss = c_diff.sum()
 
         self.log("Loss/barlow", loss.item(), sync_dist=True)
 
@@ -387,9 +401,10 @@ class xMoCoModelPTL(LightningModule):
         loss = loss_contrast
 
         if self.use_barlow_loss:
-            loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized) # seems it makes no difference whether we use this or the normalized ones, but I'll now stick to this as it is closer to what the Barlow paper did
-            #loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
-            loss = (1-self.args.barlow_weight)*loss_contrast + self.args.barlow_weight*loss_barlow
+            #loss_barlow = self.barlow_computations(docs_embeddings_unnormalized, code_embeddings_unnormalized) # seems it makes no difference whether we use this or the normalized ones, but I'll now stick to this as it is closer to what the Barlow paper did
+            loss_barlow = self.barlow_computations(docs_embeddings, code_embeddings)
+            #loss = loss_contrast + self.args.barlow_weight*loss_barlow # note that this is not strictly a "tradeoff" in the classical sense "(1-x) * a + x * b" but rather an additional loss. this seems to produce much better results
+            loss = (1-self.args.barlow_weight) * loss_contrast + self.args.barlow_weight * loss_barlow
 
         # [LOGGING]
         self.log("Loss/contrast", loss_contrast.item(), sync_dist=True)
@@ -408,6 +423,12 @@ class xMoCoModelPTL(LightningModule):
         code_samples = {"input_ids": batch["code_input_ids"], "attention_mask": batch["code_attention_mask"]}
 
         docs_embeddings, code_embeddings = self(docs_samples, code_samples, isInference=True)
+
+        if batch_idx == 0:
+            matrix_grid = torch.unsqueeze(self.barlow_matrix(docs_embeddings, code_embeddings), 0)#make_grid(self.barlow_matrix(docs_embeddings, code_embeddings), normalize=True)
+            matrix_grid.div_(int(self.args.effective_batch_size/self.args.num_gpus))
+            tb = self.logger.experiment
+            tb.add_image(f"CC matrix in epoch {self.current_epoch}", matrix_grid)
 
         docs_embeddings = F.normalize(docs_embeddings, p=2, dim=1)
         code_embeddings = F.normalize(code_embeddings, p=2, dim=1)
