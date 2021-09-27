@@ -65,6 +65,7 @@ def execute(args):
     try:
         docs_untrained = torch.load(f"cache/untrained_ruby_docs_train.pt")
         code_untrained = torch.load(f"cache/untrained_ruby_code_train.pt")
+        print(f"Untrained embeddings loaded")
 
     except:
         model = xMoCoVanillaModelPTL(args)
@@ -76,21 +77,25 @@ def execute(args):
         code_untrained=code_untrained.half()
         torch.save(docs_untrained, f"cache/untrained_ruby_docs_train.pt")
         torch.save(code_untrained, f"cache/untrained_ruby_code_train.pt")
+        print(f"Untrained embeddings generated")
 
     try:
         docs_trained = torch.load(f"cache/ruby_docs_train.pt")
         code_trained = torch.load(f"cache/ruby_train.pt")
+        print(f"Trained embeddings loaded")
     except:
         model = xMoCoModelPTL.load_from_checkpoint(f"checkpoints/ruby.ckpt")
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
 
         if dataloader==None:
-            dataloader = generateDataLoader("ruby", "train", model.docs_tokenizer, model.code_tokenizer, args)
+            dataloader = generateDataLoader("ruby", "train", tokenizer, tokenizer, args)
 
         docs_untrained, code_untrained = generateEmbeddings(model, dataloader, "trained_train")
         docs_untrained = docs_untrained.half()
         code_untrained = code_untrained.half()
         torch.save(docs_untrained, f"cache/ruby_docs_train.pt")
         torch.save(code_untrained, f"cache/ruby_train.pt")
+        print(f"Trained embeddings generated")
 
     print(f"Everything preprocessed or loaded successfully!")
 
