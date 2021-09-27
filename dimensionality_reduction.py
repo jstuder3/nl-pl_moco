@@ -12,6 +12,9 @@ from sklearn.manifold import TSNE
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import mplcursors
+
+import json
 
 from xMoCo_pl import xMoCoModelPTL
 
@@ -30,6 +33,15 @@ class xMoCoVanillaModelPTL(torch.nn.Module):
 
         self.docs_fast_encoder = AutoModel.from_pretrained("microsoft/codebert-base")
         self.code_fast_encoder = self.docs_fast_encoder
+
+def loadJson(filename):
+    cache=[]
+    with open(filename, encoding="utf-8") as file:
+        for line in file:
+            line=line.strip()
+            js = json.loads(line)
+            cache.append(js)
+    return cache
 
 @torch.no_grad()
 def generateEmbeddings(model, dataloader, subset):
@@ -64,8 +76,7 @@ def generateEmbeddings(model, dataloader, subset):
 
     return docs_embeddings_tensor, code_embeddings_tensor
 
-def downprojection(docs, code, n_pca_samples=1000, n_tsne_samples=200, pca_dimension=50, tsne_iterations=500):
-    rndperm = np.random.permutation(docs.shape[0])
+def downprojection(docs, code, rndperm, n_pca_samples=1000, n_tsne_samples=400, pca_dimension=50, tsne_iterations=600):
 
     pca = PCA(n_components=pca_dimension)
     data_joined = np.concatenate((docs, code), axis=0)
@@ -76,22 +87,13 @@ def downprojection(docs, code, n_pca_samples=1000, n_tsne_samples=200, pca_dimen
 
     pca_joined = np.concatenate((pca_docs, pca_code), axis=0)
 
-    tsne = TSNE(n_components=2, verbose=1, perplexity=40, n_iter=tsne_iterations)
+    tsne = TSNE(n_components=2, verbose=1, perplexity=30, n_iter=tsne_iterations)
     tsne_projection = tsne.fit_transform(pca_joined)
 
     tsne_docs = tsne_projection[:n_tsne_samples]
     tsne_code = tsne_projection[n_pca_samples:n_pca_samples + n_tsne_samples]
 
     return tsne_docs, tsne_code
-
-    #plt.plot([tsne_docs[:, 0], tsne_code[:, 0]], [tsne_docs[:, 1], tsne_code[:, 1]], color="k", zorder=1)
-    #plt.scatter(tsne_docs[:, 0], tsne_docs[:, 1], zorder=2, color="orange")
-    #plt.scatter(tsne_code[:, 0], tsne_code[:, 1], zorder=2, color="green")
-
-    #docs_legend = mpatches.Patch(color="orange", label="Docs")
-    #code_legend = mpatches.Patch(color="green", label="Code")
-    #plt.legend(handles=[docs_legend, code_legend])
-    #plt.show()
 
 def execute(args):
 
@@ -134,22 +136,24 @@ def execute(args):
 
     print(f"Everything preprocessed or loaded successfully!")
 
-    #print(f"Now we could do dimensionality reduction, but it's not implemented yet...")
-
     docs_untrained = docs_untrained.cpu().numpy()
     code_untrained = code_untrained.cpu().numpy()
     docs_trained = docs_trained.cpu().numpy()
     code_trained = code_trained.cpu().numpy()
 
     # starting from here, the code is heavily inspired by https://towardsdatascience.com/visualising-high-dimensional-datasets-using-pca-and-t-sne-in-python-8ef87e7915b
-    tsne_docs_untrained, tsne_code_untrained = downprojection(docs_untrained, code_untrained)
-    tsne_docs_trained, tsne_code_trained = downprojection(docs_trained, code_trained)
+    rndperm = np.random.permutation(docs_untrained.shape[0])
+    tsne_docs_untrained, tsne_code_untrained = downprojection(docs_untrained, code_untrained, rndperm)
+    tsne_docs_trained, tsne_code_trained = downprojection(docs_trained, code_trained, rndperm)
 
     plt.subplot(1, 2, 1)
 
     plt.plot([tsne_docs_untrained[:, 0], tsne_code_untrained[:, 0]], [tsne_docs_untrained[:, 1], tsne_code_untrained[:, 1]], color="k", zorder=1)
-    plt.scatter(tsne_docs_untrained[:, 0], tsne_docs_untrained[:, 1], zorder=2, color="orange")
-    plt.scatter(tsne_code_untrained[:, 0], tsne_code_untrained[:, 1], zorder=2, color="green")
+    ax_docs_untrained=plt.scatter(tsne_docs_untrained[:, 0], tsne_docs_untrained[:, 1], zorder=2, color="orange")
+    ax_code_untrained=plt.scatter(tsne_code_untrained[:, 0], tsne_code_untrained[:, 1], zorder=2, color="green")
+
+    docs_untrained_cursor = mplcursors.cursor(ax_docs_untrained, hover=True)
+    code_untrained_cursor = mplcursors.cursor(ax_code_untrained, hover=True)
 
     docs_legend = mpatches.Patch(color="orange", label="Docs")
     code_legend = mpatches.Patch(color="green", label="Code")
@@ -159,13 +163,38 @@ def execute(args):
     plt.subplot(1, 2, 2)
 
     plt.plot([tsne_docs_trained[:, 0], tsne_code_trained[:, 0]], [tsne_docs_trained[:, 1], tsne_code_trained[:, 1]], color="k", zorder=1)
-    plt.scatter(tsne_docs_trained[:, 0], tsne_docs_trained[:, 1], zorder=2, color="orange")
-    plt.scatter(tsne_code_trained[:, 0], tsne_code_trained[:, 1], zorder=2, color="green")
+    ax_docs_trained=plt.scatter(tsne_docs_trained[:, 0], tsne_docs_trained[:, 1], zorder=2, color="orange")
+    ax_code_trained=plt.scatter(tsne_code_trained[:, 0], tsne_code_trained[:, 1], zorder=2, color="green")
+
+    docs_trained_cursor = mplcursors.cursor(ax_docs_trained, hover=True)
+    code_trained_cursor = mplcursors.cursor(ax_code_trained, hover=True)
 
     docs_legend = mpatches.Patch(color="orange", label="Docs")
     code_legend = mpatches.Patch(color="green", label="Code")
     plt.legend(handles=[docs_legend, code_legend])
     plt.title("Post-training embeddings")
+
+    data_json = loadJson(args.base_data_folder+"/ruby/train.jsonl")
+
+    @docs_untrained_cursor.connect("add")
+    def on_add(sel):
+        sel.annotation.get_bbox_patch().set(fc="orange")
+        sel.annotation.set(text=f"### Encoded based on DOCS ###\n\n{data_json[rndperm[sel.target.index]]['docstring']}\n\n{data_json[rndperm[sel.target.index]]['code']}")
+
+    @code_untrained_cursor.connect("add")
+    def on_add(sel):
+        sel.annotation.get_bbox_patch().set(fc="green")
+        sel.annotation.set(text=f"### Encoded based on CODE ###\n\n{data_json[rndperm[sel.target.index]]['docstring']}\n\n{data_json[rndperm[sel.target.index]]['code']}")
+
+    @docs_trained_cursor.connect("add")
+    def on_add(sel):
+        sel.annotation.get_bbox_patch().set(fc="orange")
+        sel.annotation.set(text=f"### Encoded based on DOCS ###\n\n{data_json[rndperm[sel.target.index]]['docstring']}\n\n{data_json[rndperm[sel.target.index]]['code']}")
+
+    @code_trained_cursor.connect("add")
+    def on_add(sel):
+        sel.annotation.get_bbox_patch().set(fc="green")
+        sel.annotation.set(text=f"### Encoded based on CODE ###\n\n{data_json[rndperm[sel.target.index]]['docstring']}\n\n{data_json[rndperm[sel.target.index]]['code']}")
 
     plt.show()
 
