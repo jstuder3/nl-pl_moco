@@ -7,6 +7,12 @@ from transformers import AutoTokenizer, AutoModel
 import argparse
 import sys
 
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
 from xMoCo_pl import xMoCoModelPTL
 
 class xMoCoVanillaModelPTL(torch.nn.Module):
@@ -58,6 +64,35 @@ def generateEmbeddings(model, dataloader, subset):
 
     return docs_embeddings_tensor, code_embeddings_tensor
 
+def downprojection(docs, code, n_pca_samples=1000, n_tsne_samples=200, pca_dimension=50, tsne_iterations=500):
+    rndperm = np.random.permutation(docs.shape[0])
+
+    pca = PCA(n_components=pca_dimension)
+    data_joined = np.concatenate((docs, code), axis=0)
+    pca_projection = pca.fit_transform(data_joined)
+
+    pca_docs = pca_projection[:docs.shape[0]][rndperm][:n_pca_samples]
+    pca_code = pca_projection[docs.shape[0]:][rndperm][:n_pca_samples]
+
+    pca_joined = np.concatenate((pca_docs, pca_code), axis=0)
+
+    tsne = TSNE(n_components=2, verbose=1, perplexity=40, n_iter=tsne_iterations)
+    tsne_projection = tsne.fit_transform(pca_joined)
+
+    tsne_docs = tsne_projection[:n_tsne_samples]
+    tsne_code = tsne_projection[n_pca_samples:n_pca_samples + n_tsne_samples]
+
+    return tsne_docs, tsne_code
+
+    #plt.plot([tsne_docs[:, 0], tsne_code[:, 0]], [tsne_docs[:, 1], tsne_code[:, 1]], color="k", zorder=1)
+    #plt.scatter(tsne_docs[:, 0], tsne_docs[:, 1], zorder=2, color="orange")
+    #plt.scatter(tsne_code[:, 0], tsne_code[:, 1], zorder=2, color="green")
+
+    #docs_legend = mpatches.Patch(color="orange", label="Docs")
+    #code_legend = mpatches.Patch(color="green", label="Code")
+    #plt.legend(handles=[docs_legend, code_legend])
+    #plt.show()
+
 def execute(args):
 
     dataloader=None
@@ -99,7 +134,40 @@ def execute(args):
 
     print(f"Everything preprocessed or loaded successfully!")
 
-    print(f"Now we could do dimensionality reduction, but it's not implemented yet...")
+    #print(f"Now we could do dimensionality reduction, but it's not implemented yet...")
+
+    docs_untrained = docs_untrained.cpu().numpy()
+    code_untrained = code_untrained.cpu().numpy()
+    docs_trained = docs_trained.cpu().numpy()
+    code_trained = code_trained.cpu().numpy()
+
+    # starting from here, the code is heavily inspired by https://towardsdatascience.com/visualising-high-dimensional-datasets-using-pca-and-t-sne-in-python-8ef87e7915b
+    tsne_docs_untrained, tsne_code_untrained = downprojection(docs_untrained, code_untrained)
+    tsne_docs_trained, tsne_code_trained = downprojection(docs_trained, code_trained)
+
+    plt.subplot(1, 2, 1)
+
+    plt.plot([tsne_docs_untrained[:, 0], tsne_code_untrained[:, 0]], [tsne_docs_untrained[:, 1], tsne_code_untrained[:, 1]], color="k", zorder=1)
+    plt.scatter(tsne_docs_untrained[:, 0], tsne_docs_untrained[:, 1], zorder=2, color="orange")
+    plt.scatter(tsne_code_untrained[:, 0], tsne_code_untrained[:, 1], zorder=2, color="green")
+
+    docs_legend = mpatches.Patch(color="orange", label="Docs")
+    code_legend = mpatches.Patch(color="green", label="Code")
+    plt.legend(handles=[docs_legend, code_legend])
+    plt.title("Pre-training embeddings")
+
+    plt.subplot(1, 2, 2)
+
+    plt.plot([tsne_docs_trained[:, 0], tsne_code_trained[:, 0]], [tsne_docs_trained[:, 1], tsne_code_trained[:, 1]], color="k", zorder=1)
+    plt.scatter(tsne_docs_trained[:, 0], tsne_docs_trained[:, 1], zorder=2, color="orange")
+    plt.scatter(tsne_code_trained[:, 0], tsne_code_trained[:, 1], zorder=2, color="green")
+
+    docs_legend = mpatches.Patch(color="orange", label="Docs")
+    code_legend = mpatches.Patch(color="green", label="Code")
+    plt.legend(handles=[docs_legend, code_legend])
+    plt.title("Post-training embeddings")
+
+    plt.show()
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
