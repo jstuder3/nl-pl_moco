@@ -23,8 +23,8 @@ Requirements to run:
     pytorch
     pytorch-lightning
     transformers
-    datasets
     faiss
+    nltk
 
 There are many flags for xMoCo_pl.py, some for hyperparameters and some for debugging. The important ones are:
 
