@@ -13,9 +13,12 @@ def generateHardNegativeSearchIndices(self):
     # these indices can then be queried with vectors to obtain the k nearest neighbours in terms of inner product similarity (or in our case cosine similarity because the vectors are normalized)
 
     assert self.args.num_hard_negatives>0
-
-    self.negative_docs_queue = torch.tensor([]).type_as(self.hard_negative_docs_queue).float() #yeah, I know this is ugly
-    self.negative_code_queue = torch.tensor([]).type_as(self.hard_negative_code_queue)
+    try:
+        self.negative_docs_queue = torch.tensor([]).type_as(self.docs_queue).float() #yeah, I know this is ugly
+        self.negative_code_queue = torch.tensor([]).type_as(self.docs_queue)
+    except:
+        self.negative_docs_queue = torch.tensor([]).cuda().float() # let's hope this works, otherwise it won't be possible to have queue size 0/0 while using hard negatives
+        self.negative_code_queue = torch.tensor([]).cuda()
 
     local_rank = self.global_rank
     data = self.raw_data
