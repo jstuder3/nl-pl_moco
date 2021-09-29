@@ -35,8 +35,12 @@ def generateHardNegativeSearchIndices(self):
             sys.stdout.flush()
         start_index = int(iteration*batch_size*num_gpus + local_rank*batch_size)
         batch = data[start_index : start_index+batch_size]
-        docs_samples = {"input_ids": batch["doc_input_ids"].type_as(self.hard_negative_docs_current_index), "attention_mask": batch["doc_attention_mask"].type_as(self.hard_negative_docs_current_index)}
-        code_samples = {"input_ids": batch["code_input_ids"].type_as(self.hard_negative_docs_current_index), "attention_mask": batch["code_attention_mask"].type_as(self.hard_negative_docs_current_index)}
+        try:
+            docs_samples = {"input_ids": batch["doc_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["doc_attention_mask"].type_as(self.docs_current_index)}
+            code_samples = {"input_ids": batch["code_input_ids"].type_as(self.docs_current_index), "attention_mask": batch["code_attention_mask"].type_as(self.docs_current_index)}
+        except:
+            docs_samples = {"input_ids": batch["doc_input_ids"].cuda(), "attention_mask": batch["doc_attention_mask"].cuda()}
+            code_samples = {"input_ids": batch["code_input_ids"].cuda(), "attention_mask": batch["code_attention_mask"].cuda()}
 
         #docs_embeddings, code_embeddings = self.forward(docs_samples, code_samples, isInference=True)
         docs_embeddings, code_embeddings = self.slow_forward(docs_samples, code_samples) # need to check whether this makes any difference over using the slow encoders
