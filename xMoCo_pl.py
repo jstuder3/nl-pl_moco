@@ -424,10 +424,10 @@ class xMoCoModelPTL(LightningModule):
 
         docs_embeddings, code_embeddings = self(docs_samples, code_samples, isInference=True)
 
-        if batch_idx == 0:
+        if batch_idx == 0 and self.args.use_barlow_loss:
             self.cc_matrix_cache=torch.tensor([]).type_as(docs_samples["input_ids"]).float()
 
-        if batch_idx == 0:
+        if self.args.use_barlow_loss:
             matrix_grid = self.barlow_matrix(docs_embeddings, code_embeddings) #make_grid(self.barlow_matrix(docs_embeddings, code_embeddings), normalize=True)
             matrix_grid.div_(int(self.args.effective_batch_size))
             if self.cc_matrix_cache.shape[0]==0:
@@ -467,23 +467,24 @@ class xMoCoModelPTL(LightningModule):
         assert (docs_emb_list.shape[1] == 768)
         validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/validation", "Similarity_enc", substring="ENC")
 
-        cc_matrix_gathered = self.concatAllGather(self.cc_matrix_cache)
+        if self.args.use_barlow_loss:
+            cc_matrix_gathered = self.concatAllGather(self.cc_matrix_cache)
 
-        print(f"cc_matrix_gathered.shape: {cc_matrix_gathered.shape}; self.cc_matrix_cache.shape: {self.cc_matrix_cache.shape}")
+            print(f"cc_matrix_gathered.shape: {cc_matrix_gathered.shape}; self.cc_matrix_cache.shape: {self.cc_matrix_cache.shape}")
 
-        cc_shape=cc_matrix_gathered.shape
+            cc_shape=cc_matrix_gathered.shape
 
-        final_cc_matrix = torch.zeros((cc_shape[1], cc_shape[1])).type_as(outputs[0]["docs_embeddings"])
+            final_cc_matrix = torch.zeros((cc_shape[1], cc_shape[1])).type_as(outputs[0]["docs_embeddings"])
 
-        for i in range(int(cc_shape[0]/cc_shape[1])):
-            final_cc_matrix+=cc_matrix_gathered[i*cc_shape[1]:(i+1)*cc_shape[1], :]
+            for i in range(int(cc_shape[0]/cc_shape[1])):
+                final_cc_matrix+=cc_matrix_gathered[i*cc_shape[1]:(i+1)*cc_shape[1], :]
 
-        if self.global_rank==0:
-            #final_cc_matrix.div_(torch.max(final_cc_matrix))
-            final_cc_matrix = torch.unsqueeze(final_cc_matrix, 0)
-            print(f"final_cc_matrix.shape: {final_cc_matrix.shape}")
-            tb = self.logger.experiment
-            tb.add_image(f"CC matrix in epoch {self.current_epoch}", final_cc_matrix)
+            if self.global_rank==0:
+                #final_cc_matrix.div_(torch.max(final_cc_matrix))
+                final_cc_matrix = torch.unsqueeze(final_cc_matrix, 0)
+                print(f"final_cc_matrix.shape: {final_cc_matrix.shape}")
+                tb = self.logger.experiment
+                tb.add_image(f"CC matrix in epoch {self.current_epoch}", final_cc_matrix)
 
 
     @torch.no_grad()
