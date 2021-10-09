@@ -427,7 +427,7 @@ class xMoCoModelPTL(LightningModule):
         if batch_idx == 0 and self.args.use_barlow_loss:
             self.cc_matrix_cache=torch.tensor([]).type_as(docs_samples["input_ids"]).float()
 
-        if self.args.use_barlow_loss:
+        if batch_idx == 0 and self.args.use_barlow_loss:
             matrix_grid = self.barlow_matrix(docs_embeddings, code_embeddings) #make_grid(self.barlow_matrix(docs_embeddings, code_embeddings), normalize=True)
             matrix_grid.div_(int(self.args.effective_batch_size))
             if self.cc_matrix_cache.shape[0]==0:
