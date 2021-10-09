@@ -550,7 +550,7 @@ def execute(args):
 
         early_stopping_callback = EarlyStopping(monitor="Accuracy_enc/validation/MRR", patience=3, mode="max")
         if args.generate_checkpoints:
-            checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = "/itet-stor/jstuder/net_scratch/nl-pl_moco/checkpoints/", filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
+            checkpoint_callback = ModelCheckpoint(monitor="Accuracy_enc/validation/MRR", dirpath = args.checkpoint_base_path, filename=(str(now_str)+"-xMoCo-"+str(args.language)), mode="max")
             callbacks=[checkpoint_callback, early_stopping_callback]
         else:
             callbacks=[early_stopping_callback]
@@ -566,11 +566,11 @@ def execute(args):
 
     if args.do_test: #note: currently, this will crash the program because the folder somehow doesn't get generated; will need to fix this later
         # load best checkpoint from training
-        if not args.skip_training and args.checkpoint_path!=None:
+        if not args.skip_training and args.checkpoint_name!=None:
             model = xMoCoModelPTL.load_from_checkpoint(checkpoint_callback.best_model_path) # this somehow doesn't work, we always need to run the program again with --skip_training and --do_test and the checkpoint that was generated during training
         else:
             trainer = Trainer(gpus=args.num_gpus, logger=logger, accelerator=args.accelerator, plugins=args.plugins, precision=args.precision)
-            model = xMoCoModelPTL.load_from_checkpoint(args.checkpoint_path)
+            model = xMoCoModelPTL.load_from_checkpoint(args.checkpoint_base_path+args.checkpoint_name)
 
         # run the actual tests (data is loaded in model.test_dataloader())
         trainer.test(model=model)
@@ -608,7 +608,8 @@ if __name__ == "__main__":
     parser.add_argument("--barlow_weight", type=float, default=5e-5)
     parser.add_argument("--barlow_tied_projectors", action="store_true", default=False)
     parser.add_argument("--skip_training", action="store_true", default=False)
-    parser.add_argument("--checkpoint_path", type=str, default=None)
+    parser.add_argument("--checkpoint_base_path", type=str, default=None)
+    parser.add_argument("--checkpoint_name", type=str, default=None)
     parser.add_argument("--do_test", action="store_true", default=False)
     parser.add_argument("--generate_checkpoints", action="store_true", default=False)
     args = parser.parse_args()
