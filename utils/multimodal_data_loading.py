@@ -44,8 +44,13 @@ def read_examples(filename, args, ignore_debug=False): #ignore_debug can be used
                 js=json.loads(line)
                 if 'idx' not in js:
                     js['idx']=idx
-                code=' '.join(js['code_tokens']).replace('\n',' ')
+
+                if not args.do_adv_test:
+                    code=' '.join(js['code_tokens']).replace('\n',' ')
+                else: # the adv_test uses "function_tokens" instead of "code_tokens"
+                    code=' '.join(js['function_tokens']).replace('\n',' ')
                 code=' '.join(code.strip().split())
+
                 nl=' '.join(js['docstring_tokens']).replace('\n','')
                 nl=' '.join(nl.strip().split())
                 examples.append(

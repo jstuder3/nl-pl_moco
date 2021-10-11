@@ -159,21 +159,28 @@ class xMoCoModelPTL(LightningModule):
     @torch.no_grad()
     def test_dataloader(self):
         self.load_tokenizers()
-        # hacky workaround for concatenating two datasets while ensuring that they have the right indices (pytorch's ConcatDataset starts the index at 0 in the second dataset)
-        _, raw_data1 = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
-        _, raw_data2 = generateDataLoader(self.args.language, "test", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
 
-        docs_input_ids = torch.cat((raw_data1.doc_tokens["input_ids"], raw_data2.doc_tokens["input_ids"]), dim=0)
-        docs_attention_mask = torch.cat((raw_data1.doc_tokens["attention_mask"], raw_data2.doc_tokens["attention_mask"]), dim=0)
-        code_input_ids = torch.cat((raw_data1.code_tokens["input_ids"], raw_data2.code_tokens["input_ids"]), dim=0)
-        code_attention_mask = torch.cat((raw_data1.code_tokens["attention_mask"], raw_data2.code_tokens["attention_mask"]), dim=0)
+        if not self.args.do_adv_test:
 
-        concat_docs = {"input_ids": docs_input_ids, "attention_mask": docs_attention_mask}
-        concat_code = {"input_ids": code_input_ids, "attention_mask": code_attention_mask}
+            # hacky workaround for concatenating two datasets (validation and test) while ensuring that they have the right indices (PyTorch's ConcatDataset starts the index at 0 in the second dataset)
+            _, raw_data1 = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
+            _, raw_data2 = generateDataLoader(self.args.language, "test", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
 
-        concat_dataset = CodeSearchNetDataset(concat_docs, concat_code)
+            docs_input_ids = torch.cat((raw_data1.doc_tokens["input_ids"], raw_data2.doc_tokens["input_ids"]), dim=0)
+            docs_attention_mask = torch.cat((raw_data1.doc_tokens["attention_mask"], raw_data2.doc_tokens["attention_mask"]), dim=0)
+            code_input_ids = torch.cat((raw_data1.code_tokens["input_ids"], raw_data2.code_tokens["input_ids"]), dim=0)
+            code_attention_mask = torch.cat((raw_data1.code_tokens["attention_mask"], raw_data2.code_tokens["attention_mask"]), dim=0)
 
-        test_dataloader = torch.utils.data.DataLoader(concat_dataset, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), drop_last=True)
+            concat_docs = {"input_ids": docs_input_ids, "attention_mask": docs_attention_mask}
+            concat_code = {"input_ids": code_input_ids, "attention_mask": code_attention_mask}
+
+            concat_dataset = CodeSearchNetDataset(concat_docs, concat_code)
+
+            test_dataloader = torch.utils.data.DataLoader(concat_dataset, batch_size=int(self.args.effective_batch_size/self.args.num_gpus), drop_last=True)
+
+        else:
+            # load adversarial dataset: because we only use the test set here, we don't need to concatenate
+            test_dataloder = generateDataLoader("python_adv_test", "test", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=False)
 
         return test_dataloader
 
@@ -526,7 +533,11 @@ class xMoCoModelPTL(LightningModule):
         labels = torch.tensor(range(basis_index * local_rank, basis_index * (local_rank + 1))).type_as(outputs[0]["docs_embeddings"])
 
         assert (docs_emb_list.shape[1] == 768)
-        validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/TEST", "Similarity_TEST", substring="ENC")
+
+        if not self.args.do_adv_test:
+            validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/TEST", "Similarity_TEST", substring="ENC")
+        else:
+            validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/ADV_TEST", "Similarity_ADV_TEST", substring="ENC")
 
 def execute(args):
 
@@ -611,6 +622,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_base_path", type=str, default=None)
     parser.add_argument("--checkpoint_name", type=str, default=None)
     parser.add_argument("--do_test", action="store_true", default=False)
+    parser.add_argument("--do_adv_test", action="store_true", default=False)
     parser.add_argument("--generate_checkpoints", action="store_true", default=False)
     args = parser.parse_args()
 
