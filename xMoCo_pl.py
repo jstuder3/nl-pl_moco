@@ -160,7 +160,7 @@ class xMoCoModelPTL(LightningModule):
     def test_dataloader(self):
         self.load_tokenizers()
 
-        if not self.args.do_adv_test:
+        if not args.do_adv_test:
 
             # hacky workaround for concatenating two datasets (validation and test) while ensuring that they have the right indices (PyTorch's ConcatDataset starts the index at 0 in the second dataset)
             _, raw_data1 = generateDataLoader(self.args.language, "valid", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=True)
@@ -180,7 +180,7 @@ class xMoCoModelPTL(LightningModule):
 
         else:
             # load adversarial dataset: because we only use the test set here, we don't need to concatenate
-            test_dataloder = generateDataLoader("python_adv_test", "test", self.docs_tokenizer, self.code_tokenizer, self.args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=False)
+            test_dataloader = generateDataLoader("python_adv_test", "test", self.docs_tokenizer, self.code_tokenizer, args, shuffle=False, augment=False, num_workers=self.args.num_workers, return_raw=False)
 
         return test_dataloader
 
@@ -534,7 +534,7 @@ class xMoCoModelPTL(LightningModule):
 
         assert (docs_emb_list.shape[1] == 768)
 
-        if not self.args.do_adv_test:
+        if not args.do_adv_test:
             validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/TEST", "Similarity_TEST", substring="ENC")
         else:
             validation_computations(self, docs_emb_list, code_emb_list, labels, "Accuracy_enc/ADV_TEST", "Similarity_ADV_TEST", substring="ENC")
