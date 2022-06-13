@@ -18,12 +18,13 @@ To download this using command line, do the following:
 
 Requirements to run:
 
-    Python 3.9+
-    pytorch
-    pytorch-lightning
+    Python 3.9
+    PyTorch 1.9.0
+    pytorch-lightning 1.4.0
     transformers
-    faiss
+    faiss-cpu 1.7.1
     nltk
+    torchvision 0.10.0
 
 There are many flags for xMoCo_pl.py, some for hyperparameters and some for debugging. The important ones are:
 
