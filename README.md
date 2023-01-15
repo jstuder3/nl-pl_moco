@@ -1,4 +1,5 @@
 Repository for my bachelor thesis, where I try to improve on previous code search (NL to PL) methods by applying the xMoCo framework and other methods.
+The thesis itself can be found [here](https://pub.tik.ee.ethz.ch/students/2021-HS/BA-2021-25.pdf).
 
 ![image](https://user-images.githubusercontent.com/87820315/135263170-9643c5c2-4f72-4d91-900b-6862e9f5bc71.png)
 
